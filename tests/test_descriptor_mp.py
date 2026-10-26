@@ -1,10 +1,13 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
 from torch import nn
 
 from flexglue.descriptor import DINOv3Descriptor
+from flexglue.utils import ops
 
 
 class TinyBackbone(nn.Module):
@@ -75,6 +78,50 @@ class DescriptorPrecisionTest(unittest.TestCase):
     def test_unknown_precision_rejected(self):
         with self.assertRaisesRegex(ValueError, "descriptor mp"):
             self.build("bfloat16")
+
+    def test_caller_supplied_state_remains_independent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "extractor.pth"
+            torch.save(self.state, path)
+            with patch("flexglue.descriptor.ConvNeXt", TinyBackbone), patch(
+                "flexglue.descriptor.LinearConvHead", TinyHead
+            ):
+                model = DINOv3Descriptor(
+                    weights=str(path), state_dict=self.state, resize=(32, 32),
+                    mmap_weights=True,
+                )
+            before = model.backbone.conv.weight.detach().clone()
+            with torch.no_grad():
+                self.state["extractor.backbone.conv.weight"].add_(1)
+            self.assertTrue(torch.equal(model.backbone.conv.weight, before))
+
+    def test_owned_standalone_checkpoint_assigns_exact_submodules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "extractor.pth"
+            torch.save(self.state, path)
+            assigned = []
+            original = ops.load_into_module
+
+            def observed(*args, **kwargs):
+                result = original(*args, **kwargs)
+                assigned.append(result[1])
+                return result
+
+            with patch("flexglue.descriptor.ConvNeXt", TinyBackbone), patch(
+                "flexglue.descriptor.LinearConvHead", TinyHead
+            ), patch.object(ops, "load_into_module", side_effect=observed):
+                default = DINOv3Descriptor(weights=str(path), resize=(32, 32))
+                self.assertEqual(assigned, [False, False, False])
+                assigned.clear()
+                model = DINOv3Descriptor(
+                    weights=str(path), resize=(32, 32), mmap_weights=True
+                )
+            self.assertEqual(assigned, [True, True, True])
+            self.assertTrue(torch.equal(default.backbone.conv.weight, model.backbone.conv.weight))
+            self.assertTrue(torch.equal(
+                model.backbone.conv.weight,
+                self.state["extractor.backbone.conv.weight"],
+            ))
 
 
 if __name__ == "__main__":

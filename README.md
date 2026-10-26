@@ -269,6 +269,7 @@ Batching has a few requirements:
 - ```describe```: Also return descriptors at the given keypoints. Default: True.
 - ```mp```: Keep the backbone and feature head in resident ```"float16"``` weights and return float32 features and keypoint descriptors. ```None``` retains the float32 descriptor. Default: ```None```.
 - ```weights```: Path or URL of the weights. Default: the release weights.
+- ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; unsupported cases fall back to copying. Default: False.
 
 `FlexGlue`:
 - ```n_layers```: Number of transformer layers, fewer is faster but less accurate. Default: 9 (all).
@@ -283,6 +284,7 @@ Batching has a few requirements:
 - ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True.
 - ```query_chunk_size```: Points per correspondence-head call, bounds memory without changing results. Default: 4096.
 - ```weights```: Path or URL of the weights. Default: the release weights.
+- ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; unsupported cases fall back to copying. Default: False.
 - ```coarse_stride```: Grid pitch of ```match_dense``` and the sampled mode, in pixels of the resized image (4 doubles the resolution). Default: 8.
 - ```max_num_samples```: Maximum number of sampled matches without keypoints. Default: 5000.
 - ```kde_balance```: Spread the sampled matches over the image as RoMa v2, instead of drawing by confidence. Default: True.
