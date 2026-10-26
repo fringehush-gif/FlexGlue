@@ -121,6 +121,14 @@ def numpy_image_to_torch(image: np.ndarray) -> torch.Tensor:
         image = image[None]  # add channel axis
     else:
         raise ValueError(f"Not an image: {image.shape}")
+    if type(image) is np.ndarray and image.dtype == np.uint8:
+        # A true FP32 divide matches the old uint8 -> FP64 divide -> FP32
+        # rounding for all 256 codes in the qualified NumPy runtime. Copy
+        # first to handle OpenCV's negative-stride RGB channel view and keep
+        # the result independent of the caller's pixels.
+        output = np.array(image, dtype=np.float32, copy=True, order="K")
+        np.divide(output, np.float32(255), out=output)
+        return torch.as_tensor(output)
     return torch.tensor(image / 255.0, dtype=torch.float)
 
 
