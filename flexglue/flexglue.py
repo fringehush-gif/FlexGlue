@@ -74,12 +74,25 @@ class FlexGlue(nn.Module):
             ]
         )
         self.loaded_heads = set(range(conf.n_layers + 1))
+        state_dict = (
+            ops._read_state_dict(conf.weights)
+            if conf.weights is not None and conf.describe
+            else None
+        )
         if conf.weights is not None:
-            self.load_weights(conf.weights)
+            self.load_weights(conf.weights, state_dict=state_dict)
+        if state_dict is not None:
+            # Retire matcher tensors after copying them into the model.
+            state_dict = {
+                k: v for k, v in state_dict.items() if k.startswith("extractor.")
+            }
         # the descriptor weights live in the same file, under "extractor."
         self.descriptor = (
-            DINOv3Descriptor(weights=conf.weights) if conf.describe else None
+            DINOv3Descriptor(weights=conf.weights, state_dict=state_dict)
+            if conf.describe
+            else None
         )
+        del state_dict
         self.refiner = RoMav2Refiner(conf.refine_scales) if conf.refine else None
         self.static_lengths: Optional[Tuple[int, ...]] = None  # set by compile
 
@@ -563,9 +576,9 @@ class FlexGlue(nn.Module):
             conf.filter_threshold,
         )
 
-    def load_weights(self, weights: str) -> None:
+    def load_weights(self, weights: str, *, state_dict: Optional[dict] = None) -> None:
         """Strict for everything except whole per-layer heads, which may be absent."""
-        loaded = ops.load_state_dict(weights, "matcher.")
+        loaded = ops.load_state_dict(weights, "matcher.", state_dict=state_dict)
         depth = len({k.split(".")[1] for k in loaded if k.startswith("transformers.")})
         if self.conf.n_layers > depth:
             raise ValueError(f"n_layers={self.conf.n_layers}, weights have {depth}.")

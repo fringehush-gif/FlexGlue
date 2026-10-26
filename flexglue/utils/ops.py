@@ -5,12 +5,16 @@ import torch
 import torch.nn.functional as F
 
 
-def load_state_dict(weights: str, prefix: str) -> dict:
-    """Load a state dict from a local path or URL and keep the entries under prefix."""
+def _read_state_dict(weights: str) -> dict:
     if Path(weights).exists():
-        state_dict = torch.load(weights, map_location="cpu", weights_only=True)
-    else:
-        state_dict = torch.hub.load_state_dict_from_url(weights, map_location="cpu")
+        return torch.load(weights, map_location="cpu", weights_only=True)
+    return torch.hub.load_state_dict_from_url(weights, map_location="cpu")
+
+
+def load_state_dict(weights: str, prefix: str, *, state_dict=None) -> dict:
+    """Load or reuse a CPU state dict and keep the entries under prefix."""
+    if state_dict is None:
+        state_dict = _read_state_dict(weights)
     state_dict = {
         k[len(prefix) :]: v for k, v in state_dict.items() if k.startswith(prefix)
     }

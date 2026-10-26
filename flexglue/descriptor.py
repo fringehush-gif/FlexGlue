@@ -109,7 +109,7 @@ class DINOv3Descriptor(nn.Module):
     }
     edge_divisible_by = 32  # backbone stride
 
-    def __init__(self, **conf) -> None:
+    def __init__(self, *, state_dict: Optional[dict] = None, **conf) -> None:
         super().__init__()
         self.conf = conf = SimpleNamespace(**{**self.default_conf, **conf})
         pp.check_resize(conf.resize, self.edge_divisible_by)
@@ -118,7 +118,9 @@ class DINOv3Descriptor(nn.Module):
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406])[:, None, None])
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225])[:, None, None])
 
-        state_dict = ops.load_state_dict(conf.weights, "extractor.")
+        state_dict = ops.load_state_dict(
+            conf.weights, "extractor.", state_dict=state_dict
+        )
         sub = lambda p: {  # noqa: E731
             k.removeprefix(p): v for k, v in state_dict.items() if k.startswith(p)
         }
