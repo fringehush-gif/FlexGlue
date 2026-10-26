@@ -267,6 +267,7 @@ Batching has a few requirements:
 `DINOv3Descriptor`:
 - ```resize```: Backbone input size: an int sets the long side (aspect kept, sides floored to multiples of 32), ```(h, w)``` squashes. Default: (512, 512).
 - ```describe```: Also return descriptors at the given keypoints. Default: True.
+- ```mp```: Keep the backbone and feature head in resident ```"float16"``` weights and return float32 features and keypoint descriptors. ```None``` retains the float32 descriptor. Default: ```None```.
 - ```weights```: Path or URL of the weights. Default: the release weights.
 
 `FlexGlue`:
@@ -277,6 +278,7 @@ Batching has a few requirements:
 - ```early_stop_decay```: Stop after layer ```k``` if ```covisibility_score < min_covisibility * (1 - early_stop_decay) ** (9 - k)```, lower stops earlier. Default: None (off).
 - ```remove_border_px```: Drop matches this close to the border, in pixels of the resized image. Default: 0.0.
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
+- ```describe_mp```: Optional built-in descriptor precision. ```"float16"``` stores its backbone and feature head in half precision; preprocessing, output features, and the matcher keep their existing dtypes. Default: ```None``` (float32 descriptor).
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True.
 - ```query_chunk_size```: Points per correspondence-head call, bounds memory without changing results. Default: 4096.
@@ -289,6 +291,12 @@ Batching has a few requirements:
 - ```refine_scales```: Refiner strides, coarse to fine, fixed at construction. Default: (2, 1).
 
 </details>
+
+For an optional resident half-precision descriptor on CUDA, construct
+`FlexGlue(describe_mp="float16")` (or `DINOv3Descriptor(mp="float16")` standalone).
+The descriptor returns float32 features and keypoint descriptors, so the matcher
+keeps its existing input type. The default descriptor remains float32; half
+precision can change individual matches and is not a CPU speed setting.
 
 The default values give a good trade-off between speed and accuracy. For increased efficiency, use fewer layers to linearly reduce run time:
 ```python

@@ -74,8 +74,9 @@ class WeightLoadingTest(unittest.TestCase):
 
     def test_combined_constructor_reads_once(self):
         class Descriptor(nn.Module):
-            def __init__(self, *, weights, state_dict):
+            def __init__(self, *, weights, state_dict, mp):
                 super().__init__()
+                self.mp = mp
                 self.raw = ops.load_state_dict(
                     weights, "extractor.", state_dict=state_dict
                 )
@@ -86,8 +87,25 @@ class WeightLoadingTest(unittest.TestCase):
                 actual = self.build(state, describe=True)
                 self.assertEqual(load.call_count, 1)
         self.assertTrue(torch.equal(actual.descriptor.raw["x"], state["extractor.x"]))
+        self.assertIsNone(actual.descriptor.mp)
         self.assertIsInstance(actual.conf.weights, str)
         self.assertNotIn("state_dict", vars(actual.conf))
+
+    def test_descriptor_precision_is_fixed_and_passed_at_construction(self):
+        class Descriptor(nn.Module):
+            def __init__(self, *, weights, state_dict, mp):
+                super().__init__()
+                self.mp = mp
+
+        with patch("flexglue.flexglue.DINOv3Descriptor", Descriptor):
+            actual = FlexGlue(weights=None, describe=True, describe_mp="float16")
+        self.assertEqual(actual.descriptor.mp, "float16")
+        with self.assertRaisesRegex(KeyError, "Fixed at construction"):
+            actual.resolve_conf({"describe_mp": None})
+
+    def test_descriptor_precision_rejects_unknown_setting(self):
+        with self.assertRaisesRegex(ValueError, "describe_mp"):
+            FlexGlue(weights=None, describe=False, describe_mp="bfloat16")
 
     def test_truncated_layers(self):
         actual = self.build(n_layers=1)

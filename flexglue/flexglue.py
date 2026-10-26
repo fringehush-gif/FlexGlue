@@ -35,6 +35,7 @@ class FlexGlue(nn.Module):
         "remove_border_px": 0.0,  # border margin, pixels of the resized image
         "mp": "float16",  # transformer dtype: float16, bfloat16 or None (fp32), readout in fp32
         "describe": True,  # build a DINOv3Descriptor for inputs without features
+        "describe_mp": None,  # optional resident fp16 descriptor network
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
         "refine": False,  # refine with RoMa v2's dense refiners
         "refine_resize": (512, 512),  # refiner input, int: long side, (h, w): squash
@@ -48,6 +49,7 @@ class FlexGlue(nn.Module):
     }
     fixed_conf = (
         "weights",
+        "describe_mp",
         "refine_scales",
         "query_chunk_size",
         "input_dim",
@@ -60,6 +62,8 @@ class FlexGlue(nn.Module):
     def __init__(self, **conf) -> None:
         super().__init__()
         self.conf = conf = SimpleNamespace(**{**self.default_conf, **conf})
+        if conf.describe_mp not in (None, "float16"):
+            raise ValueError("describe_mp must be None or 'float16'.")
         d, h = conf.descriptor_dim, conf.num_heads
         self.input_proj = nn.Linear(conf.input_dim, d)
         self.posenc = LearnableFourierPositionalEncoding(2, d // h)
@@ -88,7 +92,9 @@ class FlexGlue(nn.Module):
             }
         # the descriptor weights live in the same file, under "extractor."
         self.descriptor = (
-            DINOv3Descriptor(weights=conf.weights, state_dict=state_dict)
+            DINOv3Descriptor(
+                weights=conf.weights, state_dict=state_dict, mp=conf.describe_mp
+            )
             if conf.describe
             else None
         )

@@ -105,6 +105,7 @@ class DINOv3Descriptor(nn.Module):
     default_conf = {
         "resize": (512, 512),  # int: long side, aspect kept, (h, w): squashed
         "describe": True,  # layer-0 descriptors at the keypoints, if there are any
+        "mp": None,  # None: fp32; "float16": resident half backbone and feature head
         "weights": WEIGHTS_URL,
     }
     edge_divisible_by = 32  # backbone stride
@@ -112,6 +113,8 @@ class DINOv3Descriptor(nn.Module):
     def __init__(self, *, state_dict: Optional[dict] = None, **conf) -> None:
         super().__init__()
         self.conf = conf = SimpleNamespace(**{**self.default_conf, **conf})
+        if conf.mp not in (None, "float16"):
+            raise ValueError("descriptor mp must be None or 'float16'.")
         pp.check_resize(conf.resize, self.edge_divisible_by)
         self.backbone = ConvNeXt()
         self.head = LinearConvHead()
@@ -130,12 +133,21 @@ class DINOv3Descriptor(nn.Module):
         descriptor_head = sub("descriptor_head.")
         self.descriptor_head = nn.Linear(*descriptor_head["weight"].shape[::-1])
         self.descriptor_head.load_state_dict(descriptor_head)
+        if conf.mp == "float16":
+            self.backbone.half()
+            self.head.half()
 
     def forward(self, data: dict, resize: Optional[pp.Resize] = None) -> dict:
         """Features of data["image"] (Images), descriptors at data["keypoints"]."""
         x = self.preprocess(data["image"], resize)
+        normalized = (x - self.mean) / self.std
+        if self.conf.mp == "float16":
+            normalized = normalized.to(torch.float16)
+        features = self.head(self.backbone(normalized))
+        if self.conf.mp == "float16":
+            features = features.float()
         pred = {
-            "features": self.head(self.backbone((x - self.mean) / self.std)),
+            "features": features,
             "image_size": pp.image_sizes(data["image"]).to(x),
         }
         if self.conf.describe and "keypoints" in data:
