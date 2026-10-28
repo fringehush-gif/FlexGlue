@@ -235,8 +235,13 @@ Note that all matches of a pair are invalidated if its `covisibility_score` is b
 FlexGlue matches a batch of image pairs in a single call. Images are passed as a batched tensor `(B, 3, H, W)` or as a list of `(3, H, W)` tensors, which may have different sizes:
 
 ```python
-images0 = [load_image(path).cuda() for path in paths0]  # B images, any size
-images1 = [load_image(path).cuda() for path in paths1]
+from flexglue.utils import numpy_image_to_torch, read_images
+
+# Optional bounded CPU reads; conversion and GPU work stay on this thread.
+with read_images(paths0, prefetch=True) as loaded:
+    images0 = [numpy_image_to_torch(rgb).cuda() for _, rgb in loaded]
+with read_images(paths1, prefetch=True) as loaded:
+    images1 = [numpy_image_to_torch(rgb).cuda() for _, rgb in loaded]
 
 # images only, or with a detector that returns a fixed number of keypoints
 detector = ALIKED(origin="corner", max_num_keypoints=2048, detection_threshold=0.0).eval().cuda()
@@ -253,6 +258,13 @@ for b in range(len(images0)):
     points0 = pred["keypoints0"][b][matches[..., 0]]  # pixels of images0[b]
     points1 = pred["keypoints1"][b][matches[..., 1]]  # pixels of images1[b]
 ```
+
+`read_images` preserves `read_image` pixels and input order. Its default is
+serial; `prefetch=True` uses two CPU workers with at most two prefetched images
+plus the current image. Always use the context manager so early exit cancels
+queued reads and joins running workers. Exceptions appear at their input ordinal;
+up to two successor files may already have been opened. Images are decoded
+freshly, without a persistent cache. The model and single-image APIs are unchanged.
 
 Batching has a few requirements:
 - Images of different sizes are squashed to the same `describe_resize` (the default `(512, 512)`). With an int `describe_resize` or `refine_resize`, all images must share the same aspect ratio.
