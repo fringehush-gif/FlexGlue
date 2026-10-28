@@ -1,6 +1,8 @@
+import sys
 from types import SimpleNamespace
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -127,6 +129,8 @@ class DINOv3Descriptor(nn.Module):
         self.head = LinearConvHead()
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406])[:, None, None])
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225])[:, None, None])
+        # Filled on first supported RGB8 call; absent from checkpoint/state_dict.
+        self.register_buffer("_rgb8_codebook", None, persistent=False)
 
         source_owned = conf.mmap_weights and (state_dict is None or _assign_owned_state)
         if state_dict is None:
@@ -159,6 +163,13 @@ class DINOv3Descriptor(nn.Module):
             self.backbone.half()
             self.head.half()
 
+    def _apply(self, fn, *args, **kwargs):
+        # A half->float round trip can corrupt a codebook even when its final
+        # dtype is FP32. Any module transform invalidates this derived cache.
+        self._rgb8_codebook = None
+        result = super()._apply(fn, *args, **kwargs)
+        self._rgb8_codebook = None
+        return result
     def forward(self, data: dict, resize: Optional[pp.Resize] = None) -> dict:
         """Features of data["image"] (Images), descriptors at data["keypoints"]."""
         x = self.preprocess(data["image"], resize)
@@ -184,6 +195,59 @@ class DINOv3Descriptor(nn.Module):
         """Resize and stack images to the input resolution, conf.resize if None."""
         resize = self.conf.resize if resize is None else resize
         return pp.resize_images(img, resize, self.edge_divisible_by)
+
+    def describe_rgb8(
+        self, image: np.ndarray, keypoints: Optional[torch.Tensor] = None,
+        resize: Optional[pp.Resize] = None,
+    ) -> dict:
+        """Describe an HWC RGB8 image; use Triton only in supported inference.
+
+        The accelerated route is opt-in through FlexGlue(rgb8_triton=True).
+        The caller must not mutate image during the blocking upload. GPU tensors
+        are recorded on the producer stream before their local owners retire.
+        """
+        if (not isinstance(image, np.ndarray) or image.dtype != np.uint8
+                or image.ndim != 3 or image.shape[2] != 3):
+            raise ValueError("describe_rgb8 expects an HWC RGB8 NumPy image")
+        resize = self.conf.resize if resize is None else resize
+        device = self.mean.device
+        supported = (
+            type(image) is np.ndarray and resize == (512, 512)
+            and 1 <= image.shape[0] <= 65535 and 1 <= image.shape[1] <= 65535
+            and image.shape[0] * image.shape[1] <= 64_000_000
+            and device.type == "cuda"
+            and sys.platform.startswith("linux") and not self.training
+            and not torch.is_grad_enabled()
+            and device.index == torch.cuda.current_device()
+        )
+        port = None
+        if supported:
+            try:
+                from .utils import rgb8_triton as port
+            except ModuleNotFoundError as error:
+                if error.name != "triton":
+                    raise
+        if port is not None:
+            table = self._rgb8_codebook
+            if (table is None or table.device != device or table.dtype != torch.float32
+                    or tuple(table.shape) != (256,) or not table.is_contiguous()):
+                table = torch.from_numpy(port.fp32_codebook()).to(device)
+                self._rgb8_codebook = table
+            prepared = port.prepare_rgb8(
+                image, target_hw=(512, 512), device=device,
+                codebook_device=table,
+            )
+            return port.describe_prepared(self, prepared, keypoints=keypoints)
+        # CPU, gradients, other layouts/platforms/resizes or absent Triton retain
+        # the original normalization, interpolation and descriptor forward path.
+        tensor = pp.numpy_image_to_torch(image).to(device)
+        data = {"image": tensor}
+        if keypoints is not None:
+            data["keypoints"] = keypoints
+        pred = self.forward(data, resize)
+        if keypoints is not None:
+            pred["keypoints"] = keypoints
+        return pred
 
     def sample_descriptors(
         self, features: torch.Tensor, keypoints: torch.Tensor, image_size: torch.Tensor
@@ -212,3 +276,5 @@ class DINOv3Descriptor(nn.Module):
         if keypoints is not None:
             pred["keypoints"] = keypoints
         return pred
+
+

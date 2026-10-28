@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -38,6 +39,7 @@ class FlexGlue(nn.Module):
         "describe_mp": None,  # optional resident fp16 descriptor network
         "mmap_weights": False,  # opt in to immutable local CPU checkpoint backing
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
+        "rgb8_triton": False,  # opt-in direct RGB8 descriptor grid on supported CUDA
         "refine": False,  # refine with RoMa v2's dense refiners
         "refine_resize": (512, 512),  # refiner input, int: long side, (h, w): squash
         "refine_scales": (2, 1),  # RoMa refiner strides, coarse to fine
@@ -68,6 +70,8 @@ class FlexGlue(nn.Module):
             raise ValueError("describe_mp must be None or 'float16'.")
         if not isinstance(conf.mmap_weights, bool):
             raise ValueError("mmap_weights must be a bool.")
+        if not isinstance(conf.rgb8_triton, bool):
+            raise ValueError("rgb8_triton must be a bool.")
         d, h = conf.descriptor_dim, conf.num_heads
         self.input_proj = nn.Linear(conf.input_dim, d)
         self.posenc = LearnableFourierPositionalEncoding(2, d // h)
@@ -248,9 +252,24 @@ class FlexGlue(nn.Module):
                     raise KeyError(
                         "No features: pass them or build FlexGlue(describe=True)."
                     )
-                described = self.descriptor(
-                    {"image": data_i["image"]}, resize=conf.describe_resize
-                )
+                image = data_i["image"]
+                if conf.rgb8_triton and isinstance(image, np.ndarray):
+                    if conf.refine or image.ndim != 3 or image.shape[-1] != 3 or image.dtype != np.uint8:
+                        # The refiner needs a Torch image; unsupported layouts
+                        # retain the existing normalization/resize path.
+                        image = pp.numpy_image_to_torch(image).to(self.descriptor.mean.device)
+                        data_i = {**data_i, "image": image}
+                        described = self.descriptor(
+                            {"image": image}, resize=conf.describe_resize
+                        )
+                    else:
+                        described = self.descriptor.describe_rgb8(
+                            image, resize=conf.describe_resize
+                        )
+                else:
+                    described = self.descriptor(
+                        {"image": image}, resize=conf.describe_resize
+                    )
                 data_i = {**described, **data_i}
             out.append(data_i)
         return tuple(out)
@@ -642,6 +661,8 @@ class FlexGlue(nn.Module):
         if fixed := conf.keys() & set(self.fixed_conf):
             raise KeyError(f"Fixed at construction: {sorted(fixed)}")
         c = SimpleNamespace(**{**vars(self.conf), **conf})
+        if not isinstance(c.rgb8_triton, bool):
+            raise ValueError("rgb8_triton must be a bool.")
         if not 0 <= c.n_layers <= self.conf.n_layers:
             raise ValueError(f"n_layers must be in [0, {self.conf.n_layers}].")
         if c.n_layers not in self.loaded_heads:

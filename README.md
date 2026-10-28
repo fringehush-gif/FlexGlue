@@ -281,6 +281,7 @@ Batching has a few requirements:
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
 - ```describe_mp```: Optional built-in descriptor precision. ```"float16"``` stores its backbone and feature head in half precision; preprocessing, output features, and the matcher keep their existing dtypes. Default: ```None``` (float32 descriptor).
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
+- ```rgb8_triton```: Experimental direct RGB8 preparation for the CUDA descriptor; accepts HWC RGB8 NumPy inputs when enabled. Default: False.
 - ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True.
 - ```query_chunk_size```: Points per correspondence-head call, bounds memory without changing results. Default: 4096.
 - ```weights```: Path or URL of the weights. Default: the release weights.
@@ -300,6 +301,66 @@ The descriptor returns float32 features and keypoint descriptors, so the matcher
 keeps its existing input type. The default descriptor remains float32; half
 precision can change individual matches and is not a CPU speed setting.
 
+### Optional RGB8 descriptor preparation
+
+For unbatched HWC RGB8 NumPy images, `rgb8_triton=True` can avoid transferring a
+full-resolution float image before building the descriptor grid:
+
+```python
+import torch
+from flexglue import FlexGlue
+from flexglue.utils.preprocess import read_image
+
+matcher = FlexGlue(rgb8_triton=True).eval().cuda()
+rgb0 = read_image("assets/berlin1.jpg")
+rgb1 = read_image("assets/berlin2.jpg")
+with torch.inference_mode():
+    matches = matcher.match({"image": rgb0}, {"image": rgb1})
+    # Reuse endpoint descriptors across several matching edges:
+    packet0 = matcher.descriptor.describe_rgb8(rgb0)
+    packet1 = matcher.descriptor.describe_rgb8(rgb1)
+    cached_matches = matcher.match(packet0, packet1, describe=False)
+```
+
+The flag is off by default and can also be overridden per match. Existing Torch
+inputs and feature packets retain their original path. `describe_rgb8` is an
+explicit direct-descriptor API; do not mutate NumPy pixels during upload.
+
+The accelerated route requires Linux/WSL, a CUDA descriptor on the current
+device, eval mode, disabled gradients, the `(512, 512)` descriptor grid and a
+compatible installed Triton runtime. Missing Triton, CPU, other platforms,
+training/grad mode, other resize settings, ndarray subclasses and source rasters
+outside the supported bounds use the original Torch preparation. A requested
+refiner retains a Torch image through that path. No mandatory dependency is
+added; optional kernel/runtime errors still propagate. Native Windows runtime
+parity has not been measured. The derived codebook is not serialized and is
+invalidated by module device/dtype transforms.
+
+On one RTX 3080 Ti, a fixed 11-image/12-edge graph with cached descriptors and
+warm filesystem/kernel caches took **1.230 → 1.124 s** at a 1536-pixel image cap
+and **2.830 → 2.167 s** at 3072 (CTTC, two observations per arm). This includes
+decode, upload, descriptors, matching and the final CUDA drain. Torch allocated
+peaks fell by **14.00 / 54.12 MiB**. Pixels, endpoint features, all 16 matcher
+output fields and RNG states matched the original implementation on this graph.
+The descriptor was FP32; matching used the unchanged default FP16 autocast with
+FP32 readout. These are warm graph results, not constructor, repeated raw-pair
+matching or cold-start measurements. Exact parity is qualified for Torch
+2.14.1+cu132, Triton 3.8.0, NumPy 2.5.3 and OpenCV 5.0; other stacks remain
+unqualified. See [the benchmark receipt](benchmarks/rgb8_triton.json).
+
+Portable generated tests need neither Triton nor a checkpoint:
+
+```bash
+python -m unittest discover -s tests -p test_rgb8.py
+# Optional, only on a compatible Linux CUDA stack:
+FLEXGLUE_TEST_RGB8_CUDA=1 python -m unittest discover -s tests -p test_rgb8.py
+```
+
+The CUDA test skips unless explicitly enabled and Linux CUDA/Triton are
+available. CPU tests cover the original Torch fallback, including actual
+matching, with small generated modules and images. They do not load model
+weights or download data. Weight licensing is unchanged; the DINOv3 backbone
+weights remain subject to the license described below.
 The default values give a good trade-off between speed and accuracy. For increased efficiency, use fewer layers to linearly reduce run time:
 ```python
 matcher = FlexGlue(n_layers=6)
