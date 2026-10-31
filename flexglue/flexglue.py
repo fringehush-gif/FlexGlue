@@ -236,7 +236,7 @@ class FlexGlue(nn.Module):
     ) -> dict:
         """Dense grid 0 -> 1, and 1 -> 0 if symmetric, without matching."""
         conf = self.resolve_conf(conf)
-        if conf.max_distance_px and not symmetric:
+        if ops.is_set(conf.max_distance_px) and not symmetric:
             raise ValueError("max_distance_px needs symmetric=True.")
         data0, data1 = self.describe_inputs(data0, data1, conf)
         context = self.decode_pair(data0, data1, conf)
@@ -292,7 +292,7 @@ class FlexGlue(nn.Module):
         """Refined corresp. if refine is True, bidirectional under cycle check."""
         if not conf.refine:
             return {}
-        if conf.max_distance_px:
+        if ops.is_set(conf.max_distance_px):
             dirs = ((0, 1), (1, 0))
         data = (data0, data1)
         return {
@@ -529,7 +529,7 @@ class FlexGlue(nn.Module):
             valid = valid & (dense_confidence >= conf.filter_threshold)
             valid &= ops.inside_border(dense_p2di_ii, size_i, border_i)
             valid &= ops.inside_border(pred[f"dense_p2d{i}_i{j}"], size_j, border_j)
-            if conf.max_distance_px:
+            if ops.is_set(conf.max_distance_px):
                 dense_j = {
                     "dense_p2di_nj": pred[f"dense_p2d{j}_n{i}"],
                     "dense_confidencei": pred[f"dense_confidence{j}"],
@@ -551,6 +551,13 @@ class FlexGlue(nn.Module):
     def sparse_matches(self, pred: dict, data0: dict, data1: dict, conf) -> dict:
         """Mutual nearest neighbours of keypoints and predicted points."""
         kpts0, kpts1 = data0["keypoints"], data1["keypoints"]
+        if kpts0.shape[1] == 0 or kpts1.shape[1] == 0:
+            return {
+                "matches0": kpts0.new_full(kpts0.shape[:2], -1, dtype=torch.long),
+                "matches1": kpts1.new_full(kpts1.shape[:2], -1, dtype=torch.long),
+                "matching_scores0": pred["confidence0"].new_zeros(kpts0.shape[:2]),
+                "matching_scores1": pred["confidence1"].new_zeros(kpts1.shape[:2]),
+            }
         p2d0_i1, p2d1_i0 = pred["p2d0_i1"], pred["p2d1_i0"]
         if conf.gemm_nn:  # centered on each image for float32 precision
             c0, c1 = (d["image_size"][:, None] / 2 for d in (data0, data1))
@@ -669,7 +676,34 @@ class FlexGlue(nn.Module):
             if parts[0] in ("transformers", "heads") and int(parts[1]) >= limit:
                 continue  # truncated model: layers past n_layers are not built
             state_dict[k] = v
-        (missing, unexpected), _ = ops.load_into_module(
+        # A reload owns only matcher parameters; descriptor/refiner state is separate.
+        expected = {
+            k: v
+            for k, v in self.state_dict().items()
+            if not k.startswith(("descriptor.", "refiner."))
+        }
+        missing = expected.keys() - state_dict.keys()
+        unexpected = state_dict.keys() - expected.keys()
+        if unexpected:
+            raise KeyError(f"Unexpected weights: {sorted(unexpected)}")
+        if any(not k.startswith("heads.") for k in missing):
+            raise KeyError(f"Missing weights: {sorted(missing)}")
+        partial = {int(k.split(".")[1]) for k in missing}
+        for layer in partial:
+            prefix = f"heads.{layer}."
+            if any(k.startswith(prefix) for k in state_dict):
+                raise KeyError(f"Head {layer} is only partially in the weights.")
+        for k, v in state_dict.items():
+            if not torch.overrides.is_tensor_like(v):
+                raise TypeError(f"Expected tensor-like weight for {k}.")
+            # PyTorch accepts a one-dimensional legacy value for a scalar.
+            legacy_scalar = expected[k].ndim == 0 and v.ndim == 1 and v.numel() > 0
+            if not legacy_scalar and v.shape != expected[k].shape:
+                raise RuntimeError(
+                    f"size mismatch for {k}: {tuple(v.shape)} != "
+                    f"{tuple(expected[k].shape)}"
+                )
+        ops.load_into_module(
             self,
             state_dict,
             weights,
@@ -677,15 +711,6 @@ class FlexGlue(nn.Module):
             source_unique=source_unique,
             allow_assign=_assign_during_init,
         )
-        if unexpected:
-            raise KeyError(f"Unexpected weights: {unexpected}")
-        if any(not k.startswith("heads.") for k in missing):
-            raise KeyError(f"Missing weights: {missing}")
-        partial = {int(k.split(".")[1]) for k in missing}
-        for layer in partial:
-            prefix = f"heads.{layer}."
-            if any(k.startswith(prefix) for k in state_dict):
-                raise KeyError(f"Head {layer} is only partially in the weights.")
         self.loaded_heads = set(range(self.conf.n_layers + 1)) - partial
 
     def resolve_conf(self, conf: dict) -> SimpleNamespace:

@@ -474,6 +474,59 @@ class WeightLoadingTest(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "No weights with prefix 'matcher.'"):
             self.build({})
 
+    def test_reload_validates_before_copy_and_preserves_other_modules(self):
+        model = self.build()
+        model.descriptor = nn.Linear(3, 2)
+        model.refiner = nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        owners = [id(p) for group in optimizer.param_groups for p in group["params"]]
+        original = {k: v.clone() for k, v in model.state_dict().items()}
+        heads = model.loaded_heads.copy()
+        valid = {k: v.clone() for k, v in self.state.items()}
+        invalid = []
+        missing = dict(valid)
+        del missing["matcher.input_proj.weight"]
+        invalid.append(missing)
+        partial = dict(valid)
+        del partial[next(k for k in partial if k.startswith("matcher.heads.1."))]
+        invalid.append(partial)
+        invalid.append({**valid, "matcher.unexpected": torch.tensor(1)})
+        wrong_shape = dict(valid)
+        wrong_shape["matcher.input_proj.weight"] = torch.zeros(1)
+        invalid.append(wrong_shape)
+        wrong_type = dict(valid)
+        wrong_type["matcher.input_proj.weight"] = "invalid"
+        invalid.append(wrong_type)
+        for state in invalid:
+            # If preflight were absent, this changed tensor could be copied first.
+            state["matcher.input_proj.bias"] = torch.ones_like(
+                valid["matcher.input_proj.bias"]
+            )
+            with self.assertRaises((KeyError, RuntimeError, TypeError)):
+                model.load_weights(self.path, state_dict=state)
+            self.assertEqual(model.loaded_heads, heads)
+            for k, v in model.state_dict().items():
+                self.assertTrue(torch.equal(v, original[k]), k)
+            self.assertEqual(
+                owners,
+                [id(p) for group in optimizer.param_groups for p in group["params"]],
+            )
+
+        # Native load permits dtype conversion and legacy one-dimensional scalars.
+        valid["matcher.input_proj.weight"] = valid["matcher.input_proj.weight"].double()
+        valid["matcher.heads.0.temperature"] = valid[
+            "matcher.heads.0.temperature"
+        ].reshape(1)
+        for _ in range(2):
+            model.load_weights(self.path, state_dict=valid)
+        for prefix in ("descriptor.", "refiner."):
+            for k, v in model.state_dict().items():
+                if k.startswith(prefix):
+                    self.assertTrue(torch.equal(v, original[k]))
+        self.assertEqual(
+            owners, [id(p) for group in optimizer.param_groups for p in group["params"]]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
