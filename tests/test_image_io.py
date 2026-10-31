@@ -89,6 +89,51 @@ class Scheduling(unittest.TestCase):
         with scope["read_images"]([], prefetch=True) as rows:
             self.assertEqual(list(rows), [])
 
+    def test_source_errors_follow_successful_prefix(self):
+        for failure in (0, 1, 2, 5):
+            for enabled in (False, True):
+                with self.subTest(failure=failure, enabled=enabled):
+                    calls = []
+
+                    class Source:
+                        def __iter__(self):
+                            return self
+
+                        def __next__(self):
+                            i = len(calls)
+                            calls.append(i)
+                            if i == failure:
+                                raise LookupError("source")
+                            if i == 7:
+                                raise StopIteration
+                            return i
+
+                    seen, stats = [], {}
+                    with self.assertRaisesRegex(LookupError, "source"):
+                        with helper.ordered_decode(
+                            Source(), lambda x: x * 7, enabled=enabled, stats=stats
+                        ) as rows:
+                            seen.extend(rows)
+                    self.assertEqual(seen, [(i, i * 7) for i in range(failure)])
+                    self.assertEqual(calls, list(range(failure + 1)))
+                    self.assertTrue(stats["workersJoined"])
+                    if enabled:
+                        self.assertLessEqual(stats["maxPending"], 2)
+
+    def test_loader_error_precedes_later_source_error(self):
+        def source():
+            yield 0
+            raise LookupError("source")
+
+        def load(row):
+            raise ValueError("loader")
+
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                with self.assertRaisesRegex(ValueError, "loader"):
+                    with helper.ordered_decode(source(), load, enabled=enabled) as rows:
+                        list(rows)
+
     def test_public_default_serial(self):
         owner = threading.get_ident()
         original = scope["read_image"]
@@ -217,6 +262,44 @@ class Reader(unittest.TestCase):
                             list(rows)
             finally:
                 scope["read_image"] = original
+
+
+class PublicReaderIntegration(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        for name in ("torch", "numpy", "cv2"):
+            if importlib.util.find_spec(name) is None:
+                raise unittest.SkipTest(name + " unavailable")
+        import cv2
+        import numpy as np
+
+        from flexglue.utils import preprocess, read_images
+
+        cls.cv2, cls.np = cv2, np
+        cls.read_images = staticmethod(read_images)
+        cls.preprocess = preprocess
+
+    def test_exported_reader_matches_serial_for_both_colour_modes(self):
+        self.assertIs(self.read_images, self.preprocess.read_images)
+        with tempfile.TemporaryDirectory() as root:
+            paths = [Path(root) / (str(i) + ".png") for i in range(3)]
+            for i, path in enumerate(paths):
+                pixels = (self.np.arange(7 * 11 * 3).reshape(7, 11, 3) + i).astype(
+                    self.np.uint8
+                )
+                self.assertTrue(self.cv2.imwrite(str(path), pixels))
+            for grayscale in (False, True):
+                expected = [self.preprocess.read_image(p, grayscale) for p in paths]
+                with self.read_images(
+                    iter(paths), grayscale=grayscale, prefetch=True
+                ) as rows:
+                    for index, (path, actual) in enumerate(rows):
+                        self.assertEqual(path, paths[index])
+                        reference = expected[index]
+                        self.assertEqual(actual.shape, reference.shape)
+                        self.assertEqual(actual.strides, reference.strides)
+                        self.assertEqual(actual.dtype, reference.dtype)
+                        self.assertEqual(actual.tobytes(), reference.tobytes())
 
 
 if __name__ == "__main__":

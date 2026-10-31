@@ -1,3 +1,4 @@
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -122,6 +123,9 @@ class DescriptorPrecisionTest(unittest.TestCase):
             path = Path(directory) / "extractor.pth"
             torch.save(self.state, path)
             assigned = []
+            can_assign = ops._mapped_local_checkpoint(str(path)) and (
+                "assign" in inspect.signature(nn.Module.load_state_dict).parameters
+            )
             original = ops.load_into_module
 
             def observed(*args, **kwargs):
@@ -138,7 +142,7 @@ class DescriptorPrecisionTest(unittest.TestCase):
                 model = DINOv3Descriptor(
                     weights=str(path), resize=(32, 32), mmap_weights=True
                 )
-            self.assertEqual(assigned, [True, True, True])
+            self.assertEqual(assigned, [can_assign] * 3)
             self.assertTrue(
                 torch.equal(default.backbone.conv.weight, model.backbone.conv.weight)
             )

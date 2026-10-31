@@ -181,9 +181,7 @@ class DINOv3Descriptor(nn.Module):
         # A half->float round trip can corrupt a codebook even when its final
         # dtype is FP32. Any module transform invalidates this derived cache.
         self._rgb8_codebook = None
-        result = super()._apply(fn, *args, **kwargs)
-        self._rgb8_codebook = None
-        return result
+        return super()._apply(fn, *args, **kwargs)
 
     def forward(self, data: dict, resize: Optional[pp.Resize] = None) -> dict:
         """Features of data["image"] (Images), descriptors at data["keypoints"]."""
@@ -246,6 +244,7 @@ class DINOv3Descriptor(nn.Module):
             and sys.platform.startswith("linux")
             and not self.training
             and not torch.is_grad_enabled()
+            and not torch.are_deterministic_algorithms_enabled()
             and device.index == torch.cuda.current_device()
         )
         port = None

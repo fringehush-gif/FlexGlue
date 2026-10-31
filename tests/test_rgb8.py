@@ -26,7 +26,7 @@ class TinyStride8Backbone(TinyBackbone):
         return [torch.nn.functional.avg_pool2d(self.conv(x), 8)]
 
 
-def tiny_descriptor(resize=(32, 32)):
+def tiny_descriptor(resize=(32, 32), mp=None):
     # Reuse the existing descriptor precision test's generated mock modules.
     torch.manual_seed(7)
     backbone, head, descriptor_head = TinyStride8Backbone(), TinyHead(), nn.Linear(8, 4)
@@ -42,7 +42,7 @@ def tiny_descriptor(resize=(32, 32)):
         "flexglue.descriptor.LinearConvHead", TinyHead
     ):
         return DINOv3Descriptor(
-            weights="unused", state_dict=state, resize=resize
+            weights="unused", state_dict=state, resize=resize, mp=mp
         ).eval()
 
 
@@ -277,13 +277,19 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
     def test_accelerated_pixels_features_and_original_size(self):
         from flexglue.utils import rgb8_triton
 
-        for height, width in ((512, 512), (513, 769)):
+        for mp, height, width in (
+            (None, 512, 512),
+            (None, 513, 769),
+            ("float16", 512, 512),
+            ("float16", 513, 769),
+        ):
+            self.descriptor = tiny_descriptor((512, 512), mp=mp).cuda()
             rgb = (
                 np.arange(height * width * 3, dtype=np.uint32)
                 .astype(np.uint8)
                 .reshape(height, width, 3)[:, :, ::-1]
             )
-            with self.subTest(shape=rgb.shape), torch.inference_mode():
+            with self.subTest(shape=rgb.shape, mp=mp), torch.inference_mode():
                 image = numpy_image_to_torch(rgb).cuda()
                 expected_pixels = self.descriptor.preprocess(image, (512, 512))
                 actual = self.descriptor.describe_rgb8(rgb)
@@ -294,6 +300,28 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 self.assertPacketEqual(expected_pixels, prepared.tensor)
                 self.assertPacketEqual(self.descriptor({"image": image}), actual)
                 torch.cuda.synchronize()
+
+    def test_deterministic_mode_uses_reference_preprocess(self):
+        from flexglue.utils import rgb8_triton
+
+        previous = torch.are_deterministic_algorithms_enabled()
+        warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        try:
+            torch.use_deterministic_algorithms(True)
+            for mp in (None, "float16"):
+                descriptor = tiny_descriptor((512, 512), mp=mp).cuda()
+                rgb = np.arange(513 * 769 * 3, dtype=np.uint32).astype(np.uint8)
+                rgb = rgb.reshape(513, 769, 3)[:, :, ::-1]
+                with self.subTest(mp=mp), torch.inference_mode(), patch.object(
+                    rgb8_triton, "prepare_rgb8", side_effect=AssertionError("fast path")
+                ):
+                    image = numpy_image_to_torch(rgb).cuda()
+                    expected = descriptor({"image": image})
+                    actual = descriptor.describe_rgb8(rgb)
+                    self.assertPacketEqual(expected, actual)
+                    self.assertIsNone(descriptor._rgb8_codebook)
+        finally:
+            torch.use_deterministic_algorithms(previous, warn_only=warn_only)
 
 
 if __name__ == "__main__":

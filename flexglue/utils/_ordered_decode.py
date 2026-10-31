@@ -6,7 +6,7 @@ Close the context on early exit so pending work is cancelled and workers joined.
 """
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 
 
@@ -51,12 +51,23 @@ def ordered_decode(rows, loader, *, enabled, stats=None):
     source = iter(rows)
 
     def submit():
+        nonlocal source
+        if source is None:
+            return
         try:
             row = next(source)
         except StopIteration:
+            source = None
             return
-        pending.append((row, executor.submit(loader, row)))
-        stats["submitted"] += 1
+        except Exception as error:
+            source = None
+            row, future = None, Future()
+            # Report source failures through the same ordered result path.
+            future.set_exception(error)
+        else:
+            future = executor.submit(loader, row)
+            stats["submitted"] += 1
+        pending.append((row, future))
         stats["maxPending"] = max(stats["maxPending"], len(pending))
         if len(pending) > 2:
             raise RuntimeError("prefetch bound exceeded")

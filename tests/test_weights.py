@@ -1,4 +1,4 @@
-import mmap
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +36,7 @@ class WeightLoadingTest(unittest.TestCase):
     def test_default_copy_and_opted_local_mapping(self):
         raw = {"matcher.x": torch.tensor([1.0]), "extractor.y": torch.tensor([2.0])}
         torch.save(raw, self.path)
+        mapped = ops._mapped_local_checkpoint(self.path)
         with patch.object(torch, "load", wraps=torch.load) as load:
             self.assertTrue(
                 torch.equal(
@@ -52,8 +53,9 @@ class WeightLoadingTest(unittest.TestCase):
                     raw["matcher.x"],
                 )
             )
+            kwargs = {"mmap": True} if mapped else {}
             load.assert_called_once_with(
-                self.path, map_location="cpu", weights_only=True, mmap=True
+                self.path, map_location="cpu", weights_only=True, **kwargs
             )
         with patch.object(torch, "load", side_effect=AssertionError("unexpected read")):
             self.assertIs(
@@ -78,13 +80,18 @@ class WeightLoadingTest(unittest.TestCase):
         original.weight.requires_grad_(False)
         torch.save(original.state_dict(), self.path)
         checkpoint = ops._read_state_dict(self.path, allow_mmap=True)
+        can_assign = ops._mapped_local_checkpoint(self.path) and (
+            "assign" in inspect.signature(nn.Module.load_state_dict).parameters
+        )
         target = nn.Linear(4, 3)
         target.weight.requires_grad_(False)
         (_, assigned) = ops.load_into_module(
             target, checkpoint, self.path, allow_assign=True
         )
-        self.assertTrue(assigned)
-        self.assertEqual(target.weight.data_ptr(), checkpoint["weight"].data_ptr())
+        self.assertEqual(assigned, can_assign)
+        self.assertEqual(
+            target.weight.data_ptr() == checkpoint["weight"].data_ptr(), can_assign
+        )
         self.assertFalse(target.weight.requires_grad)
         self.assertTrue(target.bias.requires_grad)
         del checkpoint
@@ -140,26 +147,46 @@ class WeightLoadingTest(unittest.TestCase):
     def test_nondefault_global_device_disables_mapping(self):
         torch.save(self.state, self.path)
         with patch.object(
-            torch, "get_default_device", return_value=torch.device("meta")
+            torch, "get_default_device", return_value=torch.device("meta"), create=True
         ):
             with patch.object(torch, "load", wraps=torch.load) as load:
                 ops._read_state_dict(self.path, allow_mmap=True)
         load.assert_called_once_with(self.path, map_location="cpu", weights_only=True)
 
     def test_missing_new_torch_apis_and_legacy_load_signature_use_copy(self):
-        torch.save(nn.Linear(4, 3).state_dict(), self.path)
-        with patch.object(torch, "get_default_device", None):
-            with patch.object(torch, "load", wraps=torch.load) as load:
-                ops._read_state_dict(self.path, allow_mmap=True)
-            load.assert_called_once_with(
-                self.path, map_location="cpu", weights_only=True
-            )
-        with patch.object(torch.serialization, "get_default_mmap_options", None):
-            with patch.object(torch, "load", wraps=torch.load) as load:
-                ops._read_state_dict(self.path, allow_mmap=True)
-            load.assert_called_once_with(
-                self.path, map_location="cpu", weights_only=True
-            )
+        expected = nn.Linear(4, 3).state_dict()
+        torch.save(expected, self.path)
+        for missing in ("get_default_device", "get_default_mmap_options"):
+            with self.subTest(missing=missing), patch.object(
+                ops, "mmap", SimpleNamespace(MAP_PRIVATE=2)
+            ), patch.object(
+                torch,
+                "get_default_device",
+                None
+                if missing == "get_default_device"
+                else lambda: torch.device("cpu"),
+                create=True,
+            ), patch.object(
+                torch.serialization,
+                "get_default_mmap_options",
+                None if missing == "get_default_mmap_options" else lambda: 2,
+                create=True,
+            ), patch.object(
+                torch, "load", wraps=torch.load
+            ) as load:
+                state = ops._read_state_dict(self.path, allow_mmap=True)
+                load.assert_called_once_with(
+                    self.path, map_location="cpu", weights_only=True
+                )
+                for name, value in expected.items():
+                    self.assertTrue(torch.equal(state[name], value))
+                target = nn.Linear(4, 3)
+                (_, assigned) = ops.load_into_module(
+                    target, state, self.path, allow_assign=True
+                )
+                self.assertFalse(assigned)
+                for name, value in target.state_dict().items():
+                    self.assertTrue(torch.equal(value, expected[name]))
 
         class LegacyLinear(nn.Linear):
             def load_state_dict(self, state_dict, strict=True):
@@ -174,9 +201,9 @@ class WeightLoadingTest(unittest.TestCase):
         )
         self.assertFalse(assigned)
 
-    def test_nonposix_platform_uses_ordinary_loader(self):
+    def test_missing_private_mapping_support_uses_ordinary_loader(self):
         torch.save(self.state, self.path)
-        with patch.object(ops, "os", SimpleNamespace(name="nt")):
+        with patch.object(ops, "mmap", SimpleNamespace()):
             with patch.object(torch, "load", wraps=torch.load) as load:
                 ops._read_state_dict(self.path, allow_mmap=True)
         load.assert_called_once_with(self.path, map_location="cpu", weights_only=True)
@@ -184,9 +211,13 @@ class WeightLoadingTest(unittest.TestCase):
     def test_shared_mapping_policy_falls_back_without_mutating_checkpoint(self):
         torch.save({"weight": torch.ones(3)}, self.path)
         original_bytes = Path(self.path).read_bytes()
-        previous = torch.serialization.get_default_mmap_options()
-        try:
-            torch.serialization.set_default_mmap_options(mmap.MAP_SHARED)
+        # Exercise shared-policy refusal even on hosts without POSIX mmap flags.
+        # Only the loader's view is mocked; torch's process-wide policy is unchanged.
+        with patch.object(ops, "mmap", SimpleNamespace(MAP_PRIVATE=2)), patch.object(
+            torch, "get_default_device", return_value=torch.device("cpu"), create=True
+        ), patch.object(
+            torch.serialization, "get_default_mmap_options", return_value=1, create=True
+        ) as policy:
             with patch.object(torch, "load", wraps=torch.load) as load:
                 state = ops._read_state_dict(self.path, allow_mmap=True)
             load.assert_called_once_with(
@@ -205,13 +236,9 @@ class WeightLoadingTest(unittest.TestCase):
             self.assertFalse(assigned)
             with torch.no_grad():
                 model.weight.add_(2)
-            self.assertEqual(
-                torch.serialization.get_default_mmap_options(), mmap.MAP_SHARED
-            )
+            self.assertEqual(policy(), 1)
             self.assertEqual(Path(self.path).read_bytes(), original_bytes)
             self.assertTrue(torch.equal(state["weight"], torch.ones(3)))
-        finally:
-            torch.serialization.set_default_mmap_options(previous)
 
     def test_url_options(self):
         url = "https://example.invalid/weights.pth"
@@ -246,13 +273,19 @@ class WeightLoadingTest(unittest.TestCase):
             assigned.append(result[1])
             return result
 
+        torch.save(self.state, self.path)
+        mapped = ops._mapped_local_checkpoint(self.path)
+        can_assign = mapped and (
+            "assign" in inspect.signature(nn.Module.load_state_dict).parameters
+        )
         with patch.object(ops, "load_into_module", side_effect=observed):
             with patch.object(torch, "load", wraps=torch.load) as load:
                 actual = self.build(mmap_weights=True)
+        kwargs = {"mmap": True} if mapped else {}
         load.assert_called_once_with(
-            self.path, map_location="cpu", weights_only=True, mmap=True
+            self.path, map_location="cpu", weights_only=True, **kwargs
         )
-        self.assertEqual(assigned, [True])
+        self.assertEqual(assigned, [can_assign])
         for name, value in actual.state_dict().items():
             self.assertTrue(torch.equal(value, self.original.state_dict()[name]))
 

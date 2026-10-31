@@ -1,7 +1,6 @@
 import inspect
 import math
 import mmap
-import os
 import zipfile
 from pathlib import Path
 
@@ -14,7 +13,6 @@ def _mapped_local_checkpoint(weights: str) -> bool:
     path = Path(weights)
     return (
         path.is_file()
-        and os.name == "posix"
         and hasattr(mmap, "MAP_PRIVATE")
         and callable(getattr(torch.serialization, "get_default_mmap_options", None))
         and callable(getattr(torch, "get_default_device", None))

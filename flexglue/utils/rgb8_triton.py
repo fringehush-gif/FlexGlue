@@ -211,12 +211,7 @@ def describe_prepared(
 ) -> dict:
     prepared.require_current_stream()
     x = prepared.tensor
-    normalized = (x - descriptor.mean) / descriptor.std
-    if descriptor.conf.mp == "float16":
-        normalized = normalized.to(torch.float16)
-    features = descriptor.head(descriptor.backbone(normalized))
-    if descriptor.conf.mp == "float16":
-        features = features.float()
+    features = descriptor.encode(x)
     pred = {"features": features, "image_size": prepared.original_size.to(x)}
     if keypoints is not None:
         pred["descriptors"] = descriptor.sample_descriptors(
