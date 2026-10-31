@@ -200,10 +200,10 @@ class DINOv3Descriptor(nn.Module):
         """Dense features (B, C, h / 8, w / 8) of images already at the input size."""
         normalized = (x - self.mean) / self.std
         if self.conf.mp == "float16":
-            normalized = normalized.to(torch.float16)
+            normalized = normalized.to(next(self.backbone.parameters()).dtype)
         features = self.head(self.backbone(normalized))
         if self.conf.mp == "float16":
-            features = features.float()
+            features = features.to(self.descriptor_head.weight.dtype)
         return features
 
     def preprocess(

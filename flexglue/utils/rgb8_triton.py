@@ -214,8 +214,9 @@ def describe_prepared(
     features = descriptor.encode(x)
     pred = {"features": features, "image_size": prepared.original_size.to(x)}
     if keypoints is not None:
-        pred["descriptors"] = descriptor.sample_descriptors(
-            features, keypoints, pred["image_size"]
-        )
+        if descriptor.conf.describe:
+            pred["descriptors"] = descriptor.sample_descriptors(
+                features, keypoints, pred["image_size"]
+            )
         pred["keypoints"] = keypoints
     return pred

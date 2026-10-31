@@ -1,4 +1,5 @@
 import inspect
+import mmap
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,6 +64,38 @@ class WeightLoadingTest(unittest.TestCase):
                 raw["extractor.y"],
             )
         self.assertEqual(set(raw), {"matcher.x", "extractor.y"})
+
+    def test_private_mapping_and_assignment_activate_when_supported(self):
+        private = getattr(mmap, "MAP_PRIVATE", None)
+        options = getattr(torch.serialization, "get_default_mmap_options", None)
+        default_device = getattr(torch, "get_default_device", None)
+        if private is None or not callable(options) or not callable(default_device):
+            self.skipTest("private mmap policy or default-device API unavailable")
+        if options() != private or default_device().type != "cpu":
+            self.skipTest("private mmap and default CPU device required")
+        if torch.get_default_dtype() != torch.float32:
+            self.skipTest("default FP32 dtype required")
+        if "assign" not in inspect.signature(nn.Module.load_state_dict).parameters:
+            self.skipTest("load_state_dict assignment unavailable")
+
+        original = nn.Linear(4, 3)
+        torch.save(original.state_dict(), self.path)
+        try:
+            torch.load(self.path, map_location="cpu", weights_only=True, mmap=True)
+        except (TypeError, RuntimeError) as exc:
+            self.skipTest(f"native checkpoint mapping unavailable: {exc}")
+        with patch.object(torch, "load", wraps=torch.load) as load:
+            checkpoint = ops._read_state_dict(self.path, allow_mmap=True)
+        load.assert_called_once_with(
+            self.path, map_location="cpu", weights_only=True, mmap=True
+        )
+        target = nn.Linear(4, 3)
+        _, assigned = ops.load_into_module(
+            target, checkpoint, self.path, allow_assign=True
+        )
+        self.assertTrue(assigned)
+        self.assertEqual(target.weight.data_ptr(), checkpoint["weight"].data_ptr())
+        self.assertEqual(target.bias.data_ptr(), checkpoint["bias"].data_ptr())
 
     def test_missing_prefix_in_preloaded_mapping(self):
         with self.assertRaisesRegex(KeyError, "No weights with prefix"):

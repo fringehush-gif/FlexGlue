@@ -93,6 +93,91 @@ class DescriptorPrecisionTest(unittest.TestCase):
                 self.assertEqual(actual.dtype, torch.float32)
                 self.assertTrue(torch.equal(actual, expected))
 
+    def test_external_autocast_preserves_legacy_encode(self):
+        try:
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                probe = torch.nn.functional.conv2d(
+                    torch.zeros(1, 3, 2, 2), torch.zeros(4, 3, 1, 1)
+                )
+        except (RuntimeError, NotImplementedError) as exc:
+            self.skipTest(f"CPU bfloat16 autocast convolution unavailable: {exc}")
+        if probe.dtype != torch.bfloat16:
+            self.skipTest("CPU convolution did not activate bfloat16 autocast")
+
+        image = torch.rand(1, 3, 32, 32)
+        for mp in (None, "float16"):
+            with self.subTest(mp=mp):
+                descriptor = self.build(mp)
+                with torch.autocast("cpu", dtype=torch.bfloat16):
+                    normalized = (image - descriptor.mean) / descriptor.std
+                    if mp == "float16":
+                        normalized = normalized.to(torch.float16)
+                    expected = descriptor.head(descriptor.backbone(normalized))
+                    if mp == "float16":
+                        expected = expected.float()
+                    actual = descriptor.encode(image)
+                self.assertEqual(actual.dtype, expected.dtype)
+                self.assertTrue(torch.equal(actual, expected))
+
+    def test_precision_follows_module_transforms(self):
+        image = torch.rand(1, 3, 32, 32)
+        for transform, dtype in (("float", torch.float32), ("double", torch.float64)):
+            with self.subTest(transform=transform):
+                descriptor = getattr(self.build("float16"), transform)()
+                image_for_model = image.to(dtype)
+                keypoints = torch.tensor([[[8.0, 8.0], [24.0, 24.0]]], dtype=dtype)
+                normalized = (image_for_model - descriptor.mean) / descriptor.std
+                expected = descriptor.head(descriptor.backbone(normalized)).to(
+                    descriptor.descriptor_head.weight.dtype
+                )
+                grid = (keypoints / image_for_model.new_tensor([32, 32])) * 2 - 1
+                sampled = torch.nn.functional.grid_sample(
+                    expected,
+                    grid[:, None],
+                    mode="bilinear",
+                    padding_mode="border",
+                    align_corners=False,
+                )[:, :, 0].transpose(1, 2)
+                sparse = torch.nn.functional.normalize(
+                    descriptor.descriptor_head(sampled), dim=-1
+                )
+                pred = descriptor.describe(image_for_model, keypoints=keypoints)
+                self.assertEqual(pred["features"].dtype, dtype)
+                self.assertEqual(pred["descriptors"].dtype, dtype)
+                self.assertTrue(torch.equal(pred["features"], expected))
+                self.assertTrue(torch.equal(pred["descriptors"], sparse))
+
+    def test_device_only_transform_preserves_resident_precision(self):
+        descriptor = self.build("float16").to(device="cpu")
+        image = torch.rand(1, 3, 32, 32)
+        normalized = ((image - descriptor.mean) / descriptor.std).to(
+            descriptor.backbone.conv.weight.dtype
+        )
+        expected = descriptor.head(descriptor.backbone(normalized)).to(
+            descriptor.descriptor_head.weight.dtype
+        )
+        self.assertEqual(descriptor.backbone.conv.weight.dtype, torch.float16)
+        self.assertEqual(descriptor.mean.dtype, torch.float32)
+        self.assertTrue(torch.equal(descriptor.encode(image), expected))
+
+    def test_half_transform_encode_when_cpu_convolution_supported(self):
+        try:
+            torch.nn.functional.conv2d(
+                torch.zeros(1, 3, 2, 2, dtype=torch.float16),
+                torch.zeros(4, 3, 1, 1, dtype=torch.float16),
+            )
+        except RuntimeError as exc:
+            self.skipTest(f"CPU float16 convolution unavailable: {exc}")
+        descriptor = self.build("float16").half()
+        image = torch.rand(1, 3, 32, 32, dtype=torch.float16)
+        normalized = (image - descriptor.mean) / descriptor.std
+        expected = descriptor.head(descriptor.backbone(normalized)).to(
+            descriptor.descriptor_head.weight.dtype
+        )
+        actual = descriptor.encode(image)
+        self.assertEqual(actual.dtype, torch.float16)
+        self.assertTrue(torch.equal(actual, expected))
+
     def test_forward_encodes_once(self):
         descriptor = self.build()
         image = torch.rand(1, 3, 32, 32)

@@ -301,6 +301,25 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 self.assertPacketEqual(self.descriptor({"image": image}), actual)
                 torch.cuda.synchronize()
 
+    def test_disabled_sparse_description_preserves_keypoints(self):
+        from flexglue.utils import rgb8_triton
+
+        self.descriptor.conf.describe = False
+        rgb = np.arange(512 * 512 * 3, dtype=np.uint32).astype(np.uint8)
+        rgb = rgb.reshape(512, 512, 3)
+        keypoints = torch.tensor([[[4.0, 4.0], [12.0, 9.0]]], device="cuda")
+        with torch.inference_mode(), patch.object(
+            self.descriptor, "sample_descriptors", side_effect=AssertionError("sampled")
+        ), patch.object(
+            rgb8_triton, "prepare_rgb8", wraps=rgb8_triton.prepare_rgb8
+        ) as prepare:
+            image = numpy_image_to_torch(rgb).cuda()
+            expected = self.descriptor({"image": image, "keypoints": keypoints})
+            expected["keypoints"] = keypoints
+            actual = self.descriptor.describe_rgb8(rgb, keypoints)
+            prepare.assert_called_once()
+            self.assertPacketEqual(expected, actual)
+
     def test_deterministic_mode_uses_reference_preprocess(self):
         from flexglue.utils import rgb8_triton
 
