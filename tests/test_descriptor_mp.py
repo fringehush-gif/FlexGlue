@@ -1,5 +1,5 @@
-import unittest
 import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -79,6 +79,26 @@ class DescriptorPrecisionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "descriptor mp"):
             self.build("bfloat16")
 
+    def test_encode_preserves_legacy_precision_path(self):
+        image = torch.rand(1, 3, 32, 32)
+        for mp in (None, "float16"):
+            with self.subTest(mp=mp):
+                descriptor = self.build(mp)
+                normalized = (image - descriptor.mean) / descriptor.std
+                if mp == "float16":
+                    normalized = normalized.to(torch.float16)
+                expected = descriptor.head(descriptor.backbone(normalized)).float()
+                actual = descriptor.encode(descriptor.preprocess(image))
+                self.assertEqual(actual.dtype, torch.float32)
+                self.assertTrue(torch.equal(actual, expected))
+
+    def test_forward_encodes_once(self):
+        descriptor = self.build()
+        image = torch.rand(1, 3, 32, 32)
+        with patch.object(descriptor, "encode", wraps=descriptor.encode) as encode:
+            descriptor.forward({"image": image})
+        encode.assert_called_once()
+
     def test_caller_supplied_state_remains_independent(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "extractor.pth"
@@ -87,7 +107,9 @@ class DescriptorPrecisionTest(unittest.TestCase):
                 "flexglue.descriptor.LinearConvHead", TinyHead
             ):
                 model = DINOv3Descriptor(
-                    weights=str(path), state_dict=self.state, resize=(32, 32),
+                    weights=str(path),
+                    state_dict=self.state,
+                    resize=(32, 32),
                     mmap_weights=True,
                 )
             before = model.backbone.conv.weight.detach().clone()
@@ -117,11 +139,15 @@ class DescriptorPrecisionTest(unittest.TestCase):
                     weights=str(path), resize=(32, 32), mmap_weights=True
                 )
             self.assertEqual(assigned, [True, True, True])
-            self.assertTrue(torch.equal(default.backbone.conv.weight, model.backbone.conv.weight))
-            self.assertTrue(torch.equal(
-                model.backbone.conv.weight,
-                self.state["extractor.backbone.conv.weight"],
-            ))
+            self.assertTrue(
+                torch.equal(default.backbone.conv.weight, model.backbone.conv.weight)
+            )
+            self.assertTrue(
+                torch.equal(
+                    model.backbone.conv.weight,
+                    self.state["extractor.backbone.conv.weight"],
+                )
+            )
 
 
 if __name__ == "__main__":

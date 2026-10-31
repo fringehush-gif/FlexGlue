@@ -1,6 +1,6 @@
 import collections.abc as collections
-from pathlib import Path
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Union
 
 import cv2
@@ -185,6 +185,7 @@ def read_images(paths, grayscale=False, *, prefetch=False):
     """
     from ._ordered_decode import ordered_decode
 
-    with ordered_decode(paths, lambda path: read_image(path, grayscale=grayscale),
-                        enabled=prefetch) as images:
+    with ordered_decode(
+        paths, lambda path: read_image(path, grayscale=grayscale), enabled=prefetch
+    ) as images:
         yield images

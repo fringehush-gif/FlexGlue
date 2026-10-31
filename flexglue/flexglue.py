@@ -31,10 +31,10 @@ class FlexGlue(nn.Module):
         "num_heads": 8,
         "filter_threshold": 0.1,  # min match confidence
         "max_distance_px": 3.0,  # max cycle error, pixels of the resized image
-        "min_covisibility": 0.0,  # invalidate all matches if covisibility_score is below
+        "min_covisibility": 0.0,  # invalidate matches if covisibility_score is below
         "early_stop_decay": None,  # in [0, 1): decay per earlier layer (0: no decay)
         "remove_border_px": 0.0,  # border margin, pixels of the resized image
-        "mp": "float16",  # transformer dtype: float16, bfloat16 or None (fp32), readout in fp32
+        "mp": "float16",  # transformer dtype: float16, bfloat16 or None (fp32)
         "describe": True,  # build a DINOv3Descriptor for inputs without features
         "describe_mp": None,  # optional resident fp16 descriptor network
         "mmap_weights": False,  # opt in to immutable local CPU checkpoint backing
@@ -47,6 +47,7 @@ class FlexGlue(nn.Module):
         "max_num_samples": 5000,  # matches sampled from the grids without keypoints
         "kde_balance": True,  # RoMa v2's kde balancing of the sampled matches
         "gemm_nn": True,  # sparse: mutual NN on summed squared distances, much faster
+        "exact_nn": False,  # gemm_nn: distances from differences, not one GEMM (exact)
         "query_chunk_size": 4096,  # points per correspondence-head call, bounds memory
         "weights": WEIGHTS_URL,
     }
@@ -93,11 +94,13 @@ class FlexGlue(nn.Module):
         )
         source_unique = (
             (conf.mmap_weights and ops._unique_storage(state_dict.values()))
-            if state_dict is not None else False
+            if state_dict is not None
+            else False
         )
         if conf.weights is not None:
             self.load_weights(
-                conf.weights, state_dict=state_dict,
+                conf.weights,
+                state_dict=state_dict,
                 _assign_during_init=conf.mmap_weights,
             )
         if state_dict is not None:
@@ -108,7 +111,9 @@ class FlexGlue(nn.Module):
         # the descriptor weights live in the same file, under "extractor."
         self.descriptor = (
             DINOv3Descriptor(
-                weights=conf.weights, state_dict=state_dict, mp=conf.describe_mp,
+                weights=conf.weights,
+                state_dict=state_dict,
+                mp=conf.describe_mp,
                 mmap_weights=conf.mmap_weights,
                 _assign_source_unique=source_unique,
                 _assign_owned_state=True,
@@ -189,7 +194,7 @@ class FlexGlue(nn.Module):
                 )
             pred[f"p2d{i}_n{j}"] = p2di_nj
             pred[f"p2d{i}_i{j}"] = ops.denormalize_keypoints(p2di_nj, size_j)
-            if conf.max_distance_px and cycle:
+            if cycle and ops.is_set(conf.max_distance_px):
                 error, back_confidence = self.cycle_error(
                     context, i, kpts_ni, p2di_nj, size_i, dense.get(j)
                 )
@@ -254,10 +259,17 @@ class FlexGlue(nn.Module):
                     )
                 image = data_i["image"]
                 if conf.rgb8_triton and isinstance(image, np.ndarray):
-                    if conf.refine or image.ndim != 3 or image.shape[-1] != 3 or image.dtype != np.uint8:
+                    if (
+                        conf.refine
+                        or image.ndim != 3
+                        or image.shape[-1] != 3
+                        or image.dtype != np.uint8
+                    ):
                         # The refiner needs a Torch image; unsupported layouts
                         # retain the existing normalization/resize path.
-                        image = pp.numpy_image_to_torch(image).to(self.descriptor.mean.device)
+                        image = pp.numpy_image_to_torch(image).to(
+                            self.descriptor.mean.device
+                        )
                         data_i = {**data_i, "image": image}
                         described = self.descriptor(
                             {"image": image}, resize=conf.describe_resize
@@ -277,7 +289,7 @@ class FlexGlue(nn.Module):
     def prepare_dense(
         self, context: PairContext, data0: dict, data1: dict, dirs: List[tuple], conf
     ) -> Dict[int, Dict[str, torch.Tensor]]:
-        """Refined grids by source image, both directions if the cycle check needs them."""
+        """Refined corresp. if refine is True, bidirectional under cycle check."""
         if not conf.refine:
             return {}
         if conf.max_distance_px:
@@ -316,19 +328,40 @@ class FlexGlue(nn.Module):
         tokens = torch.cat([x0, x1], 1).float()
         return torch.sigmoid(covisibility(tokens)).mean((1, 2))
 
+    def encode_pair(self, f0: torch.Tensor, f1: torch.Tensor) -> tuple:
+        """Input tokens (B, h * w, D) and positional encodings of both feature maps."""
+        enc0, enc1 = (
+            self.posenc(ops.cell_centers(*hw, scale=(max(hw),) * 2, device=f.device))
+            for f, hw in ((f0, f0.shape[-2:]), (f1, f1.shape[-2:]))
+        )
+        x0, x1 = self.input_proj(f0.flatten(2).mT), self.input_proj(f1.flatten(2).mT)
+        return x0, x1, enc0, enc1
+
+    def pair_context(
+        self,
+        x0: torch.Tensor,
+        x1: torch.Tensor,
+        hw: Tuple[tuple, tuple],
+        layer: int,
+        covisibility_score: Optional[torch.Tensor] = None,
+    ) -> PairContext:
+        """PairContext from the tokens after layer, float32 cross features."""
+        x0, x1 = x0.float(), x1.float()
+        if self.static_lengths is not None:  # own the tokens, not the graph's buffers
+            x0, x1 = x0.clone(), x1.clone()
+        if covisibility_score is None:
+            covisibility_score = self.covisibility_score(x0, x1, layer)
+        cf = (x0.mT.unflatten(-1, hw[0]), x1.mT.unflatten(-1, hw[1]))
+        return PairContext(layer, covisibility_score, cf)
+
     def decode_pair(
         self, data0: dict, data1: dict, conf: SimpleNamespace
     ) -> PairContext:
-        """Cross features and covisibility_score of the pair, refiner features if refine."""
+        """Cross features and covisibility_score of the pair (+ refine features)."""
         if self.static_lengths is not None:  # new CUDA graph step per pair
             torch.compiler.cudagraph_mark_step_begin()
         f0, f1 = data0["features"], data1["features"]
-        hw0, hw1 = f0.shape[-2:], f1.shape[-2:]
-        enc0, enc1 = (
-            self.posenc(ops.cell_centers(*hw, scale=(max(hw),) * 2, device=f0.device))
-            for hw in (hw0, hw1)
-        )
-        x0, x1 = self.input_proj(f0.flatten(2).mT), self.input_proj(f1.flatten(2).mT)
+        x0, x1, enc0, enc1 = self.encode_pair(f0, f1)
         layer, covisibility_score = conf.n_layers, None
         dtype = torch.float16 if conf.mp is None else getattr(torch, conf.mp)
         with torch.autocast(f0.device.type, dtype, enabled=conf.mp is not None):
@@ -342,13 +375,8 @@ class FlexGlue(nn.Module):
                 if (score < conf.min_covisibility * gamma).all():
                     layer, covisibility_score = k, score
                     break
-        x0, x1 = x0.float(), x1.float()
-        if self.static_lengths is not None:  # own the tokens, not the graph's buffers
-            x0, x1 = x0.clone(), x1.clone()
-        if covisibility_score is None:
-            covisibility_score = self.covisibility_score(x0, x1, layer)
-        cf = (x0.mT.unflatten(-1, hw0), x1.mT.unflatten(-1, hw1))
-        context = PairContext(layer, covisibility_score, cf)
+        hw = (f0.shape[-2:], f1.shape[-2:])
+        context = self.pair_context(x0, x1, hw, layer, covisibility_score)
         if conf.refine:
             fine = tuple(
                 self.refiner.extract(d["image"], resize=conf.refine_resize)
@@ -425,7 +453,7 @@ class FlexGlue(nn.Module):
     def sample_correspondences(
         self, dense: Dict[str, torch.Tensor], points_ni: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Read a grid at normalized points (B, N, 2): predicted points and confidence."""
+        """Read dense correspondences and confidence at normalized points (B, N, 2)."""
         p2di_nj = ops.sample_features(ops.to_chw(dense["dense_p2di_nj"]), points_ni)
         confidence = ops.sample_features(dense["dense_confidencei"][:, None], points_ni)
         return p2di_nj, confidence[..., 0]
@@ -439,7 +467,7 @@ class FlexGlue(nn.Module):
         size_i: torch.Tensor,
         dense_j: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Map p2di_nj back to i with the grid j -> i or the head: error in px, confidence."""
+        """Map p2di_nj back to i with the dense j->i warping or the head."""
         if dense_j is None:
             cf_i, cf_j = context.direction(i)
             back_ni, back_confidence = self.run_head(context.layer, p2di_nj, cf_j, cf_i)
@@ -461,7 +489,7 @@ class FlexGlue(nn.Module):
         data = (data0, data1)
         scale = (self.pixel_scale(data0), self.pixel_scale(data1))
         is_covisible = context.covisibility_score >= conf.min_covisibility
-        if conf.min_covisibility > 0:
+        if ops.is_set(conf.min_covisibility):
             pred["is_covisible"] = is_covisible
         for i, j in ((0, 1), (1, 0)):
             if f"confidence{i}" not in pred:
@@ -528,7 +556,8 @@ class FlexGlue(nn.Module):
             c0, c1 = (d["image_size"][:, None] / 2 for d in (data0, data1))
             x = torch.cat([p2d0_i1 - c1, kpts0 - c0], -1)
             y = torch.cat([kpts1 - c1, p2d1_i0 - c0], -1)
-            m0, m1 = ops.mutual_nn(ops.sq_dist_gemm(x, y))
+            sq_dist = ops.sq_dist if conf.exact_nn else ops.sq_dist_gemm
+            m0, m1 = ops.mutual_nn(sq_dist(x, y))
 
             # exact mean distance of the selected pairs only
             def take(t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
@@ -557,7 +586,7 @@ class FlexGlue(nn.Module):
         valid1 = (m1 > -1) & (scores1 >= conf.filter_threshold)
         valid0 &= pred["valid0"] & pred["valid1"].gather(1, m0.clamp(0))
         valid1 &= pred["valid1"] & pred["valid0"].gather(1, m1.clamp(0))
-        if conf.max_distance_px:  # dist averages both images, so does the scale
+        if ops.is_set(conf.max_distance_px):  # dist and scale average both images
             scale = (self.pixel_scale(data0) + self.pixel_scale(data1)) / 2
             max_dist = conf.max_distance_px * scale[:, None]
             valid0 &= dist0 < max_dist
@@ -616,14 +645,15 @@ class FlexGlue(nn.Module):
         )
 
     def load_weights(
-        self, weights: str, *, state_dict: Optional[dict] = None,
-        _assign_during_init: bool = False
+        self,
+        weights: str,
+        *,
+        state_dict: Optional[dict] = None,
+        _assign_during_init: bool = False,
     ) -> None:
         """Strict for everything except whole per-layer heads, which may be absent."""
         if state_dict is None:
-            state_dict = ops._read_state_dict(
-                weights, allow_mmap=_assign_during_init
-            )
+            state_dict = ops._read_state_dict(weights, allow_mmap=_assign_during_init)
         source_unique = _assign_during_init and ops._unique_storage(state_dict.values())
         loaded = ops.load_state_dict(weights, "matcher.", state_dict=state_dict)
         depth = len({k.split(".")[1] for k in loaded if k.startswith("transformers.")})
@@ -640,7 +670,11 @@ class FlexGlue(nn.Module):
                 continue  # truncated model: layers past n_layers are not built
             state_dict[k] = v
         (missing, unexpected), _ = ops.load_into_module(
-            self, state_dict, weights, strict=False, source_unique=source_unique,
+            self,
+            state_dict,
+            weights,
+            strict=False,
+            source_unique=source_unique,
             allow_assign=_assign_during_init,
         )
         if unexpected:

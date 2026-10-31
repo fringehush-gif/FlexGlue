@@ -4,10 +4,10 @@ Uses two CPU workers. The
 consumer owns one current item; at most two further futures own decoded items.
 Close the context on early exit so pending work is cancelled and workers joined.
 """
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-import time
 
 
 @contextmanager
@@ -19,48 +19,62 @@ def ordered_decode(rows, loader, *, enabled, stats=None):
     Worker startup, initial reads and join occur inside this context.
     """
     stats = stats if stats is not None else {}
-    stats.update(submitted=0, consumed=0, maxPending=0, consumerWaitSeconds=0.,
-                 joinSeconds=0., workersJoined=False)
+    stats.update(
+        submitted=0,
+        consumed=0,
+        maxPending=0,
+        consumerWaitSeconds=0.0,
+        joinSeconds=0.0,
+        workersJoined=False,
+    )
     if not enabled:
+
         def serial():
             for row in rows:
-                stats['submitted'] += 1
+                stats["submitted"] += 1
                 value = loader(row)
-                stats['consumed'] += 1
+                stats["consumed"] += 1
                 yield row, value
                 del value
+
         iterator = serial()
         try:
             yield iterator
         finally:
             iterator.close()
-            stats['workersJoined'] = True
+            stats["workersJoined"] = True
         return
-    executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='flex-ordered-decode')
+    executor = ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="flex-ordered-decode"
+    )
     pending = deque()
     source = iter(rows)
+
     def submit():
         try:
             row = next(source)
         except StopIteration:
             return
         pending.append((row, executor.submit(loader, row)))
-        stats['submitted'] += 1
-        stats['maxPending'] = max(stats['maxPending'], len(pending))
+        stats["submitted"] += 1
+        stats["maxPending"] = max(stats["maxPending"], len(pending))
         if len(pending) > 2:
-            raise RuntimeError('prefetch bound exceeded')
+            raise RuntimeError("prefetch bound exceeded")
+
     def ordered():
-        submit(); submit()
+        submit()
+        submit()
         while pending:
             row, future = pending.popleft()
             waited = time.perf_counter()
             value = future.result()
-            stats['consumerWaitSeconds'] += time.perf_counter() - waited
+            stats["consumerWaitSeconds"] += time.perf_counter() - waited
             del future
-            stats['consumed'] += 1
+            stats["consumed"] += 1
             submit()
             yield row, value
             del value
+
     iterator = ordered()
     try:
         yield iterator
@@ -70,6 +84,6 @@ def ordered_decode(rows, loader, *, enabled, stats=None):
             future.cancel()
         started = time.perf_counter()
         executor.shutdown(wait=True, cancel_futures=True)
-        stats['joinSeconds'] = time.perf_counter() - started
+        stats["joinSeconds"] = time.perf_counter() - started
         pending.clear()
-        stats['workersJoined'] = True
+        stats["workersJoined"] = True

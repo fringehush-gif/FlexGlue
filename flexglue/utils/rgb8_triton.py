@@ -21,7 +21,12 @@ def fp32_codebook() -> np.ndarray:
 
 def select_upload_pixels(rgb: np.ndarray) -> tuple[np.ndarray, int]:
     """Borrow exact OpenCV BGR backing, or fall back to owning RGB bytes."""
-    if type(rgb) is not np.ndarray or rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
+    if (
+        type(rgb) is not np.ndarray
+        or rgb.dtype != np.uint8
+        or rgb.ndim != 3
+        or rgb.shape[2] != 3
+    ):
         raise ValueError("expected HWC RGB8 NumPy image")
     width = rgb.shape[1]
     if rgb.strides == (width * 3, 3, -1):
@@ -36,11 +41,19 @@ def select_upload_pixels(rgb: np.ndarray) -> tuple[np.ndarray, int]:
 @lru_cache(maxsize=1)
 def _kernel():
     @triton.jit
-    def resize(src, table, out,
-               SRC_W: tl.constexpr, SRC_H: tl.constexpr,
-               DST_W: tl.constexpr, DST_H: tl.constexpr,
-               SCALE_X: tl.constexpr, SCALE_Y: tl.constexpr,
-               SOURCE_IS_BGR: tl.constexpr, BLOCK: tl.constexpr):
+    def resize(
+        src,
+        table,
+        out,
+        SRC_W: tl.constexpr,
+        SRC_H: tl.constexpr,
+        DST_W: tl.constexpr,
+        DST_H: tl.constexpr,
+        SCALE_X: tl.constexpr,
+        SCALE_Y: tl.constexpr,
+        SOURCE_IS_BGR: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
         i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         mask = i < (DST_W * DST_H * 3)
         channel = i % 3
@@ -64,14 +77,22 @@ def _kernel():
             y1 = tl.minimum(y0 + 1, SRC_H - 1)
             wx = sx - x0.to(tl.float32)
             wy = sy - y0.to(tl.float32)
-            a = ((y0 * SRC_W + x0) * 3 + source_channel)
-            b = ((y0 * SRC_W + x1) * 3 + source_channel)
-            c = ((y1 * SRC_W + x0) * 3 + source_channel)
-            d = ((y1 * SRC_W + x1) * 3 + source_channel)
-            v00 = tl.load(table + tl.load(src + a, mask, other=0).to(tl.int32), mask, other=0.0)
-            v01 = tl.load(table + tl.load(src + b, mask, other=0).to(tl.int32), mask, other=0.0)
-            v10 = tl.load(table + tl.load(src + c, mask, other=0).to(tl.int32), mask, other=0.0)
-            v11 = tl.load(table + tl.load(src + d, mask, other=0).to(tl.int32), mask, other=0.0)
+            a = (y0 * SRC_W + x0) * 3 + source_channel
+            b = (y0 * SRC_W + x1) * 3 + source_channel
+            c = (y1 * SRC_W + x0) * 3 + source_channel
+            d = (y1 * SRC_W + x1) * 3 + source_channel
+            v00 = tl.load(
+                table + tl.load(src + a, mask, other=0).to(tl.int32), mask, other=0.0
+            )
+            v01 = tl.load(
+                table + tl.load(src + b, mask, other=0).to(tl.int32), mask, other=0.0
+            )
+            v10 = tl.load(
+                table + tl.load(src + c, mask, other=0).to(tl.int32), mask, other=0.0
+            )
+            v11 = tl.load(
+                table + tl.load(src + d, mask, other=0).to(tl.int32), mask, other=0.0
+            )
             w0, w1 = 1.0 - wx, wx
             h0, h1 = 1.0 - wy, wy
             value = h0 * (w0 * v00 + w1 * v01) + h1 * (w0 * v10 + w1 * v11)
@@ -90,20 +111,36 @@ class PreparedDescriptorInput:
     def require_current_stream(self) -> None:
         current = torch.cuda.current_stream(self.tensor.device)
         if current.cuda_stream != self.producer_stream.cuda_stream:
-            raise RuntimeError("descriptor input must be consumed on its producer stream")
+            raise RuntimeError(
+                "descriptor input must be consumed on its producer stream"
+            )
 
 
-def prepare_rgb8(rgb: np.ndarray, *, target_hw: tuple[int, int] = (512, 512),
-                 device: Union[torch.device, str] = "cuda",
-                 codebook_device: Optional[torch.Tensor] = None) -> PreparedDescriptorInput:
-    if type(rgb) is not np.ndarray or rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
+def prepare_rgb8(
+    rgb: np.ndarray,
+    *,
+    target_hw: tuple[int, int] = (512, 512),
+    device: Union[torch.device, str] = "cuda",
+    codebook_device: Optional[torch.Tensor] = None,
+) -> PreparedDescriptorInput:
+    if (
+        type(rgb) is not np.ndarray
+        or rgb.dtype != np.uint8
+        or rgb.ndim != 3
+        or rgb.shape[2] != 3
+    ):
         raise ValueError("expected HWC RGB8 NumPy image")
     src_h, src_w = (int(v) for v in rgb.shape[:2])
-    if not (1 <= src_h <= 65535 and 1 <= src_w <= 65535 and src_h * src_w <= 64_000_000):
+    if not (
+        1 <= src_h <= 65535 and 1 <= src_w <= 65535 and src_h * src_w <= 64_000_000
+    ):
         raise ValueError("source grid outside bounded prototype")
-    if (not isinstance(target_hw, tuple) or len(target_hw) != 2
-            or any(type(v) is not int or not 1 <= v <= 4096 for v in target_hw)
-            or target_hw[0] * target_hw[1] * 3 * 4 > 512 * 1024**2):
+    if (
+        not isinstance(target_hw, tuple)
+        or len(target_hw) != 2
+        or any(type(v) is not int or not 1 <= v <= 4096 for v in target_hw)
+        or target_hw[0] * target_hw[1] * 3 * 4 > 512 * 1024**2
+    ):
         raise ValueError("target grid outside bounded prototype")
     dst_h, dst_w = target_hw
     device = torch.device(device)
@@ -117,16 +154,24 @@ def prepare_rgb8(rgb: np.ndarray, *, target_hw: tuple[int, int] = (512, 512),
     host_pixels, source_is_bgr = select_upload_pixels(rgb)
     # Blocking Torch copy owns device bytes before the borrowed host view can retire.
     source = torch.from_numpy(host_pixels).to(device=device, non_blocking=False)
-    if source.dtype != torch.uint8 or source.shape != (src_h, src_w, 3) or not source.is_contiguous():
+    if (
+        source.dtype != torch.uint8
+        or source.shape != (src_h, src_w, 3)
+        or not source.is_contiguous()
+    ):
         raise RuntimeError("RGB8 upload contract differs")
     device = source.device
     if codebook_device is None:
         table = torch.from_numpy(fp32_codebook()).to(device=device, non_blocking=False)
     else:
         table = codebook_device
-        if (not isinstance(table, torch.Tensor) or table.device != device
-                or table.dtype != torch.float32 or tuple(table.shape) != (256,)
-                or not table.is_contiguous()):
+        if (
+            not isinstance(table, torch.Tensor)
+            or table.device != device
+            or table.dtype != torch.float32
+            or tuple(table.shape) != (256,)
+            or not table.is_contiguous()
+        ):
             raise ValueError("caller-owned codebook binding differs")
     output = torch.empty((1, 3, dst_h, dst_w), dtype=torch.float32, device=device)
     if output.stride() != (3 * dst_h * dst_w, dst_h * dst_w, dst_w, 1):
@@ -136,20 +181,34 @@ def prepare_rgb8(rgb: np.ndarray, *, target_hw: tuple[int, int] = (512, 512),
     # Request FMA contraction explicitly for the qualified interpolation order.
     # No libdevice FTZ is needed for this bounded normal-value interpolation.
     _kernel()[((count + 255) // 256,)](
-        source, table, output, src_w, src_h, dst_w, dst_h,
-        float(np.float32(src_w / dst_w)), float(np.float32(src_h / dst_h)),
-        bool(source_is_bgr), 256, num_warps=4,
-        enable_fp_fusion=True, enable_reflect_ftz=False,
+        source,
+        table,
+        output,
+        src_w,
+        src_h,
+        dst_w,
+        dst_h,
+        float(np.float32(src_w / dst_w)),
+        float(np.float32(src_h / dst_h)),
+        bool(source_is_bgr),
+        256,
+        num_warps=4,
+        enable_fp_fusion=True,
+        enable_reflect_ftz=False,
     )
     source.record_stream(stream)
     table.record_stream(stream)
     output.record_stream(stream)
     size = torch.tensor([[src_w, src_h]], device=device, dtype=torch.float32)
-    return PreparedDescriptorInput(output, size, (rgb, host_pixels, source, table), stream)
+    return PreparedDescriptorInput(
+        output, size, (rgb, host_pixels, source, table), stream
+    )
 
 
 @torch.no_grad()
-def describe_prepared(descriptor, prepared: PreparedDescriptorInput, *, keypoints=None) -> dict:
+def describe_prepared(
+    descriptor, prepared: PreparedDescriptorInput, *, keypoints=None
+) -> dict:
     prepared.require_current_stream()
     x = prepared.tensor
     normalized = (x - descriptor.mean) / descriptor.std
@@ -160,8 +219,8 @@ def describe_prepared(descriptor, prepared: PreparedDescriptorInput, *, keypoint
         features = features.float()
     pred = {"features": features, "image_size": prepared.original_size.to(x)}
     if keypoints is not None:
-        pred["descriptors"] = descriptor.sample_descriptors(features, keypoints, pred["image_size"])
+        pred["descriptors"] = descriptor.sample_descriptors(
+            features, keypoints, pred["image_size"]
+        )
         pred["keypoints"] = keypoints
     return pred
-
-

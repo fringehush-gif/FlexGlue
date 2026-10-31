@@ -27,9 +27,7 @@ class WeightLoadingTest(unittest.TestCase):
         )
         torch.manual_seed(0)
         self.original = FlexGlue(weights=None, **self.conf)
-        self.state = {
-            "matcher." + k: v for k, v in self.original.state_dict().items()
-        }
+        self.state = {"matcher." + k: v for k, v in self.original.state_dict().items()}
 
     def build(self, state=None, **conf):
         torch.save(self.state if state is None else state, self.path)
@@ -39,9 +37,11 @@ class WeightLoadingTest(unittest.TestCase):
         raw = {"matcher.x": torch.tensor([1.0]), "extractor.y": torch.tensor([2.0])}
         torch.save(raw, self.path)
         with patch.object(torch, "load", wraps=torch.load) as load:
-            self.assertTrue(torch.equal(
-                ops.load_state_dict(self.path, "matcher.")["x"], raw["matcher.x"]
-            ))
+            self.assertTrue(
+                torch.equal(
+                    ops.load_state_dict(self.path, "matcher.")["x"], raw["matcher.x"]
+                )
+            )
             load.assert_called_once_with(
                 self.path, map_location="cpu", weights_only=True
             )
@@ -70,9 +70,7 @@ class WeightLoadingTest(unittest.TestCase):
         torch.save(self.state, self.path, _use_new_zipfile_serialization=False)
         with patch.object(torch, "load", wraps=torch.load) as load:
             actual = FlexGlue(weights=self.path, **self.conf)
-        load.assert_called_once_with(
-            self.path, map_location="cpu", weights_only=True
-        )
+        load.assert_called_once_with(self.path, map_location="cpu", weights_only=True)
         self.assertEqual(actual.loaded_heads, {0, 1, 2})
 
     def test_exact_module_assignment_preserves_grad_and_storage_lifetime(self):
@@ -104,7 +102,9 @@ class WeightLoadingTest(unittest.TestCase):
         tied = Tied()
         before = tied.weight
         (_, assigned) = ops.load_into_module(
-            tied, ops._read_state_dict(self.path, allow_mmap=True), self.path,
+            tied,
+            ops._read_state_dict(self.path, allow_mmap=True),
+            self.path,
             allow_assign=True,
         )
         self.assertFalse(assigned)
@@ -115,7 +115,9 @@ class WeightLoadingTest(unittest.TestCase):
         torch.save(source.state_dict(), self.path)
         target = nn.Linear(4, 3, dtype=torch.float64)
         (_, assigned) = ops.load_into_module(
-            target, ops._read_state_dict(self.path, allow_mmap=True), self.path,
+            target,
+            ops._read_state_dict(self.path, allow_mmap=True),
+            self.path,
             allow_assign=True,
         )
         self.assertFalse(assigned)
@@ -137,12 +139,12 @@ class WeightLoadingTest(unittest.TestCase):
 
     def test_nondefault_global_device_disables_mapping(self):
         torch.save(self.state, self.path)
-        with patch.object(torch, "get_default_device", return_value=torch.device("meta")):
+        with patch.object(
+            torch, "get_default_device", return_value=torch.device("meta")
+        ):
             with patch.object(torch, "load", wraps=torch.load) as load:
                 ops._read_state_dict(self.path, allow_mmap=True)
-        load.assert_called_once_with(
-            self.path, map_location="cpu", weights_only=True
-        )
+        load.assert_called_once_with(self.path, map_location="cpu", weights_only=True)
 
     def test_missing_new_torch_apis_and_legacy_load_signature_use_copy(self):
         torch.save(nn.Linear(4, 3).state_dict(), self.path)
@@ -165,7 +167,9 @@ class WeightLoadingTest(unittest.TestCase):
 
         legacy = LegacyLinear(4, 3)
         (_, assigned) = ops.load_into_module(
-            legacy, ops._read_state_dict(self.path, allow_mmap=True), self.path,
+            legacy,
+            ops._read_state_dict(self.path, allow_mmap=True),
+            self.path,
             allow_assign=True,
         )
         self.assertFalse(assigned)
@@ -175,9 +179,7 @@ class WeightLoadingTest(unittest.TestCase):
         with patch.object(ops, "os", SimpleNamespace(name="nt")):
             with patch.object(torch, "load", wraps=torch.load) as load:
                 ops._read_state_dict(self.path, allow_mmap=True)
-        load.assert_called_once_with(
-            self.path, map_location="cpu", weights_only=True
-        )
+        load.assert_called_once_with(self.path, map_location="cpu", weights_only=True)
 
     def test_shared_mapping_policy_falls_back_without_mutating_checkpoint(self):
         torch.save({"weight": torch.ones(3)}, self.path)
@@ -203,7 +205,9 @@ class WeightLoadingTest(unittest.TestCase):
             self.assertFalse(assigned)
             with torch.no_grad():
                 model.weight.add_(2)
-            self.assertEqual(torch.serialization.get_default_mmap_options(), mmap.MAP_SHARED)
+            self.assertEqual(
+                torch.serialization.get_default_mmap_options(), mmap.MAP_SHARED
+            )
             self.assertEqual(Path(self.path).read_bytes(), original_bytes)
             self.assertTrue(torch.equal(state["weight"], torch.ones(3)))
         finally:
@@ -256,21 +260,33 @@ class WeightLoadingTest(unittest.TestCase):
         actual = self.build(mmap_weights=True)
         owners = {name: id(value) for name, value in actual.named_parameters()}
         optimizer = torch.optim.SGD(actual.parameters(), lr=0.01)
-        optimizer_owners = [id(value) for group in optimizer.param_groups for value in group["params"]]
+        optimizer_owners = [
+            id(value) for group in optimizer.param_groups for value in group["params"]
+        ]
         actual.load_weights(self.path)
         self.assertEqual(
             owners, {name: id(value) for name, value in actual.named_parameters()}
         )
         self.assertEqual(
             optimizer_owners,
-            [id(value) for group in optimizer.param_groups for value in group["params"]],
+            [
+                id(value)
+                for group in optimizer.param_groups
+                for value in group["params"]
+            ],
         )
 
     def test_combined_constructor_reads_once(self):
         class Descriptor(nn.Module):
             def __init__(
-                self, *, weights, state_dict, mp, mmap_weights, _assign_source_unique,
-                _assign_owned_state
+                self,
+                *,
+                weights,
+                state_dict,
+                mp,
+                mmap_weights,
+                _assign_source_unique,
+                _assign_owned_state,
             ):
                 super().__init__()
                 self.mp = mp
@@ -297,8 +313,14 @@ class WeightLoadingTest(unittest.TestCase):
     def test_cross_prefix_checkpoint_alias_disables_assignment(self):
         class Descriptor(nn.Module):
             def __init__(
-                self, *, weights, state_dict, mp, mmap_weights, _assign_source_unique,
-                _assign_owned_state
+                self,
+                *,
+                weights,
+                state_dict,
+                mp,
+                mmap_weights,
+                _assign_source_unique,
+                _assign_owned_state,
             ):
                 super().__init__()
                 self.assign_source_unique = _assign_source_unique
@@ -315,8 +337,14 @@ class WeightLoadingTest(unittest.TestCase):
     def test_descriptor_precision_is_fixed_and_passed_at_construction(self):
         class Descriptor(nn.Module):
             def __init__(
-                self, *, weights, state_dict, mp, mmap_weights, _assign_source_unique,
-                _assign_owned_state
+                self,
+                *,
+                weights,
+                state_dict,
+                mp,
+                mmap_weights,
+                _assign_source_unique,
+                _assign_owned_state,
             ):
                 super().__init__()
                 self.mp = mp

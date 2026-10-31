@@ -114,9 +114,12 @@ class DINOv3Descriptor(nn.Module):
     edge_divisible_by = 32  # backbone stride
 
     def __init__(
-        self, *, state_dict: Optional[dict] = None,
+        self,
+        *,
+        state_dict: Optional[dict] = None,
         _assign_source_unique: Optional[bool] = None,
-        _assign_owned_state: bool = False, **conf
+        _assign_owned_state: bool = False,
+        **conf,
     ) -> None:
         super().__init__()
         self.conf = conf = SimpleNamespace(**{**self.default_conf, **conf})
@@ -140,24 +143,35 @@ class DINOv3Descriptor(nn.Module):
         source_unique = source_owned and ops._unique_storage(state_dict.values())
         if _assign_source_unique is not None:
             source_unique = source_unique and _assign_source_unique
-        state_dict = ops.load_state_dict(conf.weights, "extractor.", state_dict=state_dict)
+        state_dict = ops.load_state_dict(
+            conf.weights, "extractor.", state_dict=state_dict
+        )
         sub = lambda p: {  # noqa: E731
             k.removeprefix(p): v for k, v in state_dict.items() if k.startswith(p)
         }
         ops.load_into_module(
-            self.backbone, sub("backbone."), conf.weights,
-            source_unique=source_unique, allow_assign=conf.mmap_weights,
+            self.backbone,
+            sub("backbone."),
+            conf.weights,
+            source_unique=source_unique,
+            allow_assign=conf.mmap_weights,
         )
         ops.load_into_module(
-            self.head, sub("head."), conf.weights,
-            source_unique=source_unique, allow_assign=conf.mmap_weights,
+            self.head,
+            sub("head."),
+            conf.weights,
+            source_unique=source_unique,
+            allow_assign=conf.mmap_weights,
         )
         # layer-0 matcher head, input_proj and to_search fused into one linear map
         descriptor_head = sub("descriptor_head.")
         self.descriptor_head = nn.Linear(*descriptor_head["weight"].shape[::-1])
         ops.load_into_module(
-            self.descriptor_head, descriptor_head, conf.weights,
-            source_unique=source_unique, allow_assign=conf.mmap_weights,
+            self.descriptor_head,
+            descriptor_head,
+            conf.weights,
+            source_unique=source_unique,
+            allow_assign=conf.mmap_weights,
         )
         if conf.mp == "float16":
             self.backbone.half()
@@ -170,17 +184,12 @@ class DINOv3Descriptor(nn.Module):
         result = super()._apply(fn, *args, **kwargs)
         self._rgb8_codebook = None
         return result
+
     def forward(self, data: dict, resize: Optional[pp.Resize] = None) -> dict:
         """Features of data["image"] (Images), descriptors at data["keypoints"]."""
         x = self.preprocess(data["image"], resize)
-        normalized = (x - self.mean) / self.std
-        if self.conf.mp == "float16":
-            normalized = normalized.to(torch.float16)
-        features = self.head(self.backbone(normalized))
-        if self.conf.mp == "float16":
-            features = features.float()
         pred = {
-            "features": features,
+            "features": self.encode(x),
             "image_size": pp.image_sizes(data["image"]).to(x),
         }
         if self.conf.describe and "keypoints" in data:
@@ -188,6 +197,16 @@ class DINOv3Descriptor(nn.Module):
                 pred["features"], data["keypoints"], pred["image_size"]
             )
         return pred
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Dense features (B, C, h / 8, w / 8) of images already at the input size."""
+        normalized = (x - self.mean) / self.std
+        if self.conf.mp == "float16":
+            normalized = normalized.to(torch.float16)
+        features = self.head(self.backbone(normalized))
+        if self.conf.mp == "float16":
+            features = features.float()
+        return features
 
     def preprocess(
         self, img: pp.Images, resize: Optional[pp.Resize] = None
@@ -197,7 +216,9 @@ class DINOv3Descriptor(nn.Module):
         return pp.resize_images(img, resize, self.edge_divisible_by)
 
     def describe_rgb8(
-        self, image: np.ndarray, keypoints: Optional[torch.Tensor] = None,
+        self,
+        image: np.ndarray,
+        keypoints: Optional[torch.Tensor] = None,
         resize: Optional[pp.Resize] = None,
     ) -> dict:
         """Describe an HWC RGB8 image; use Triton only in supported inference.
@@ -206,17 +227,24 @@ class DINOv3Descriptor(nn.Module):
         The caller must not mutate image during the blocking upload. GPU tensors
         are recorded on the producer stream before their local owners retire.
         """
-        if (not isinstance(image, np.ndarray) or image.dtype != np.uint8
-                or image.ndim != 3 or image.shape[2] != 3):
+        if (
+            not isinstance(image, np.ndarray)
+            or image.dtype != np.uint8
+            or image.ndim != 3
+            or image.shape[2] != 3
+        ):
             raise ValueError("describe_rgb8 expects an HWC RGB8 NumPy image")
         resize = self.conf.resize if resize is None else resize
         device = self.mean.device
         supported = (
-            type(image) is np.ndarray and resize == (512, 512)
-            and 1 <= image.shape[0] <= 65535 and 1 <= image.shape[1] <= 65535
+            type(image) is np.ndarray
+            and resize == (512, 512)
+            and 1 <= image.shape[0] <= 65535
+            and 1 <= image.shape[1] <= 65535
             and image.shape[0] * image.shape[1] <= 64_000_000
             and device.type == "cuda"
-            and sys.platform.startswith("linux") and not self.training
+            and sys.platform.startswith("linux")
+            and not self.training
             and not torch.is_grad_enabled()
             and device.index == torch.cuda.current_device()
         )
@@ -229,12 +257,19 @@ class DINOv3Descriptor(nn.Module):
                     raise
         if port is not None:
             table = self._rgb8_codebook
-            if (table is None or table.device != device or table.dtype != torch.float32
-                    or tuple(table.shape) != (256,) or not table.is_contiguous()):
+            if (
+                table is None
+                or table.device != device
+                or table.dtype != torch.float32
+                or tuple(table.shape) != (256,)
+                or not table.is_contiguous()
+            ):
                 table = torch.from_numpy(port.fp32_codebook()).to(device)
                 self._rgb8_codebook = table
             prepared = port.prepare_rgb8(
-                image, target_hw=(512, 512), device=device,
+                image,
+                target_hw=(512, 512),
+                device=device,
                 codebook_device=table,
             )
             return port.describe_prepared(self, prepared, keypoints=keypoints)
@@ -276,5 +311,3 @@ class DINOv3Descriptor(nn.Module):
         if keypoints is not None:
             pred["keypoints"] = keypoints
         return pred
-
-
