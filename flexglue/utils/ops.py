@@ -207,9 +207,10 @@ def sq_dist(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     run in TF32 (e.g. ONNX Runtime on CUDA by default). One coordinate at a time,
     without (B, M, N, D) intermediates.
     """
-    return sum(
-        (x[..., i, None] - y[..., i][:, None]).square() for i in range(x.shape[-1])
-    )
+    dist = (x[..., 0, None] - y[..., 0][:, None]).square()
+    for i in range(1, x.shape[-1]):
+        dist.add_((x[..., i, None] - y[..., i][:, None]).square())
+    return dist
 
 
 def is_set(threshold) -> bool:
