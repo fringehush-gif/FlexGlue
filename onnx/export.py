@@ -69,6 +69,7 @@ import argparse
 import contextlib
 import copy
 import hashlib
+import re
 import sys
 import time
 from pathlib import Path
@@ -225,7 +226,9 @@ class SparseMatcherONNX(nn.Module):
         super().__init__()
         self.matcher = matcher
         self.n_layers = matcher.conf.n_layers
-        self.conf = matcher.resolve_conf({"mp": None, "exact_nn": True})
+        self.conf = matcher.resolve_conf(
+            {"mp": None, "exact_nn": True, "early_stop_decay": None}
+        )
         self.debug_outputs = debug_outputs
         # Cast the transformer layers to float16, including their residual
         # stream and LayerNorms, unlike the autocast of FlexGlue(mp="float16")
@@ -320,8 +323,14 @@ class LayerScoresMatcherONNX(SparseMatcherONNX):
     """
 
     def __init__(self, matcher: FlexGlue, check_layers, fp16: bool = False):
+        check_layers = matcher.stopping_layers(
+            SimpleNamespace(
+                n_layers=matcher.conf.n_layers, early_stop_layers=check_layers
+            )
+        )
+        matcher.require_heads(check_layers)
         super().__init__(matcher, fp16)
-        self.check_layers = tuple(check_layers)
+        self.check_layers = check_layers
 
     def forward(
         self,
@@ -474,6 +483,37 @@ def early_stop_check(k: int, n_layers: int, outputs, continue_branch):
     return stop_condition(prefix, score, n_layers - k) + [if_node]
 
 
+def read_early_stop_layers(graphs):
+    """Read every stop from its score input, independent of If-node names.
+
+    The matcher exporter emits If only for early stopping. Refuse unknown
+    predicates rather than comparing an incomplete schedule.
+    """
+    layers = []
+    for graph in graphs:
+        producers = {output: node for node in graph.node for output in node.output}
+        for node in graph.node:
+            if node.op_type != "If":
+                continue
+            condition = producers.get(node.input[0]) if len(node.input) == 1 else None
+            score = (
+                condition.input[0]
+                if condition is not None
+                and condition.op_type == "Less"
+                and len(condition.input) == 2
+                else ""
+            )
+            match = re.fullmatch(r"covisibility_score_layer(\d+)", score)
+            if match is None:
+                raise ValueError(
+                    "Cannot identify every early-stop predicate in this graph."
+                )
+            layers.append(int(match.group(1)))
+    if len(layers) != len(set(layers)):
+        raise ValueError("The graph has duplicate early-stop stages.")
+    return sorted(layers)
+
+
 def add_early_stopping(path: Path, check_layers, n_layers: int):
     """Turn the graph of LayerScoresMatcherONNX into nested If nodes.
 
@@ -555,6 +595,7 @@ def export_descriptor(descriptor, path: Path, size, opset: int):
         output_names=["features"],
         opset_version=opset,
         dynamo=True,
+        verbose=False,
         external_data=False,
     )
 
@@ -631,17 +672,27 @@ def export_matcher(
     early_stop_layers=None,
 ):
     """Export a copy of the matcher (the export modifies it in place)."""
+    check_layers = (
+        ()
+        if early_stop_layers is None
+        else matcher.stopping_layers(
+            SimpleNamespace(
+                n_layers=matcher.conf.n_layers, early_stop_layers=early_stop_layers
+            )
+        )
+    )
+    matcher.require_heads((matcher.conf.n_layers, *check_layers))
+    if check_layers and debug_outputs:
+        raise ValueError("debug_outputs cannot be combined with early stopping.")
     matcher = copy.deepcopy(matcher)
     output_names = MATCHER_OUTPUTS + (DEBUG_OUTPUTS if debug_outputs else [])
-    if early_stop_layers:
-        assert not debug_outputs
-        check_layers = sorted(early_stop_layers)
-        assert 1 <= check_layers[0] and check_layers[-1] < matcher.conf.n_layers
+    if check_layers:
         model = LayerScoresMatcherONNX(matcher, check_layers, fp16=fp16).eval()
         output_names += [f"covisibility_score_layer{k}" for k in check_layers]
     else:
         model = SparseMatcherONNX(matcher, fp16, debug_outputs).eval()
     inputs = dummy_matcher_inputs(size)
+    # torch.export specializes size-one dimensions; the graph still accepts N=1.
     n0 = torch.export.Dim("num_keypoints0", min=2, max=65536)
     n1 = torch.export.Dim("num_keypoints1", min=2, max=65536)
     dynamic_shapes = {name: None for name in MATCHER_INPUTS}
@@ -656,6 +707,7 @@ def export_matcher(
             dynamic_shapes=dynamic_shapes,
             opset_version=opset,
             dynamo=True,
+            verbose=False,
             external_data=False,
             custom_translation_table={
                 torch.ops.flexglue.multi_head_attention.default: (
@@ -665,7 +717,7 @@ def export_matcher(
             },
         )
     make_keypoint_dims_dynamic(path)
-    if early_stop_layers:
+    if check_layers:
         add_early_stopping(path, check_layers, matcher.conf.n_layers)
 
 

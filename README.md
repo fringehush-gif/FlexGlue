@@ -237,7 +237,8 @@ FlexGlue matches a batch of image pairs in a single call. Images are passed as a
 ```python
 from flexglue.utils import numpy_image_to_torch, read_images
 
-# Optional bounded CPU reads; conversion and GPU work stay on this thread.
+# paths0/paths1 must already fit one GPU batch. Only CPU prefetch is bounded.
+# Conversion and GPU work stay on this thread.
 with read_images(paths0, prefetch=True) as loaded:
     images0 = [numpy_image_to_torch(rgb).cuda() for _, rgb in loaded]
 with read_images(paths1, prefetch=True) as loaded:
@@ -281,7 +282,7 @@ Batching has a few requirements:
 - ```describe```: Also return descriptors at the given keypoints. Default: True.
 - ```mp```: Keep the backbone and feature head in resident ```"float16"``` weights and return float32 features and keypoint descriptors. ```None``` retains the float32 descriptor. Default: ```None```.
 - ```weights```: Path or URL of the weights. Default: the release weights.
-- ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; unsupported cases fall back to copying. Default: False.
+- ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; other configurations use ordinary loading. Checkpoint read errors still propagate. Default: False.
 
 `FlexGlue`:
 - ```n_layers```: Number of transformer layers, fewer is faster but less accurate. Default: 9 (all).
@@ -289,6 +290,7 @@ Batching has a few requirements:
 - ```max_distance_px```: Maximum cycle error, or mutual nearest-neighbor distance in sparse mode, in pixels of the descriptor input. Non-positive values or None disable it. Default: 3.0.
 - ```min_covisibility```: Reject all matches of pairs with a lower ```covisibility_score```, e.g. 0.8 for noisy image sets. Default: 0.0 (off).
 - ```early_stop_decay```: Stop after layer ```k``` if ```covisibility_score < min_covisibility * (1 - early_stop_decay) ** (9 - k)```, lower stops earlier. Default: None (off).
+- ```early_stop_layers```: Intermediate layers to check, e.g. `(2, 4, 6, 8)` to match the released ONNX schedule. Default: `None` (every intermediate layer); `()` disables intermediate checks. Layers at or beyond a per-call `n_layers` are ignored; the decay exponent still uses the full model depth.
 - ```remove_border_px```: Drop matches this close to the border, in pixels of the descriptor input. Default: 0.0.
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
 - ```describe_mp```: Optional built-in descriptor precision. ```"float16"``` stores its backbone and feature head in half precision; preprocessing, output features, and the matcher keep their existing dtypes. Default: ```None``` (float32 descriptor).
@@ -298,7 +300,7 @@ Batching has a few requirements:
 - ```exact_nn```: With ```gemm_nn```, compute the squared distances from coordinate differences instead of one matrix multiplication: slower but exact, also where float32 matrix multiplications run in TF32. Default: False.
 - ```query_chunk_size```: Points per correspondence-head call, bounds memory without changing results. None processes all points at once. Default: 4096.
 - ```weights```: Path or URL of the weights. Default: the release weights.
-- ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; unsupported cases fall back to copying. Default: False.
+- ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; other configurations use ordinary loading. Checkpoint read errors still propagate. Default: False.
 - ```coarse_stride```: Grid pitch of ```match_dense``` and the sampled mode, in pixels of the resized image (4 doubles the resolution). Default: 8.
 - ```max_num_samples```: Maximum number of sampled matches without keypoints. Default: 5000.
 - ```kde_balance```: Spread the sampled matches over the image as RoMa v2, instead of drawing by confidence. Default: True.
@@ -413,7 +415,7 @@ FlexGlue can be exported to [ONNX](https://onnx.ai/) and run with [ONNX Runtime]
 - [`flexglue_descriptor.onnx`](https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue_descriptor.onnx): `image (1, 3, 512, 512)` in [0, 1], squashed to 512x512 with a bilinear resize -> dense `features (1, 256, 64, 64)`. It runs once per image.
 - [`flexglue_matcher.onnx`](https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue_matcher.onnx) (or [`flexglue_matcher_fp16.onnx`](https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue_matcher_fp16.onnx) with float16 transformer layers, for CUDA): the sparse mode, which matches the keypoints of two images given their dense features. It returns `matches0`, `mscores0` and the `covisibility_score` of the pair. `filter_threshold`, `max_distance_px` and `min_covisibility` are inputs of the model and can be changed at runtime. Unlike in PyTorch, `max_distance_px = 0` rejects all matches: use `inf` to disable the check. Both images need at least one keypoint.
 
-The models are available in the [release](https://github.com/cvg/FlexGlue/releases/tag/v0.1) and are used by [COLMAP](https://github.com/colmap/colmap). [onnx/match_pair.py](onnx/match_pair.py) shows how to match two images with them, using only numpy, OpenCV and ONNX Runtime:
+The models are available in the [release](https://github.com/cvg/FlexGlue/releases/tag/v0.1). [COLMAP](https://github.com/colmap/colmap) uses the descriptor and the `_early_stop` matcher variants. [onnx/match_pair.py](onnx/match_pair.py) shows how to match two images with them, using only numpy, OpenCV and ONNX Runtime:
 ```bash
 python -m pip install onnxruntime-gpu opencv-python  # or onnxruntime for CPU only
 python onnx/match_pair.py assets/berlin1.jpg assets/berlin2.jpg --output matches.png
