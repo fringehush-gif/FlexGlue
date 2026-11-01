@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +27,98 @@ class ExportIsolationTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("flexglue_export_test", path)
         cls.export = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.export)
+
+    def test_descriptor_frames_in_runtime(self):
+        if importlib.util.find_spec("onnxruntime") is None:
+            self.skipTest("optional dependency onnxruntime is unavailable")
+        import onnxruntime as ort
+
+        from flexglue import FlexGlue
+
+        export = self.export
+        for size, fused in (((16, 32), False), ((32, 16), True)):
+            with self.subTest(
+                size=size, fused=fused
+            ), tempfile.TemporaryDirectory() as tmp:
+                torch.manual_seed(17)
+                model = FlexGlue(
+                    weights=None,
+                    describe=False,
+                    n_layers=1,
+                    descriptor_dim=32,
+                    search_dim=8,
+                    num_heads=4,
+                    mp=None,
+                    query_chunk_size=None,
+                ).eval()
+                with torch.no_grad():
+                    for parameter in model.heads[1].offset_head.parameters():
+                        parameter.zero_()
+                    model.heads[1].matchability.weight.zero_()
+                    model.heads[1].matchability.bias.fill_(2.0)
+                path = Path(tmp) / "matcher.onnx"
+                with torch.no_grad():
+                    export.export_matcher(model, path, size, 18, fused=fused)
+                    session = ort.InferenceSession(
+                        str(path), providers=["CPUExecutionProvider"]
+                    )
+                    for n0, n1, resolution in ((3, 5, 1536), (11, 2, 3072)):
+                        inputs = list(export.dummy_matcher_inputs(size, n0, n1))
+                        for k, dimensions in (
+                            (0, (resolution, resolution // 2)),
+                            (1, (resolution // 2, resolution)),
+                        ):
+                            scale = inputs[4 + k].new_tensor([dimensions])
+                            inputs[2 + k] = (
+                                inputs[2 + k] / inputs[4 + k][:, None] * scale[:, None]
+                            )
+                            inputs[4 + k] = scale
+                        data = [
+                            {
+                                "features": inputs[k],
+                                "keypoints": inputs[2 + k],
+                                "image_size": inputs[4 + k],
+                            }
+                            for k in (0, 1)
+                        ]
+                        for limit in (float("inf"), 0.0):
+                            inputs[6], inputs[7] = torch.tensor(0.0), torch.tensor(
+                                limit
+                            )
+                            pred = model.match(
+                                *data,
+                                sparse=True,
+                                exact_nn=True,
+                                filter_threshold=inputs[6],
+                                max_distance_px=inputs[7],
+                            )
+                            outputs = session.run(
+                                None,
+                                {
+                                    key: value.numpy()
+                                    for key, value in zip(export.MATCHER_INPUTS, inputs)
+                                },
+                            )
+                            self.assertTrue(
+                                torch.equal(
+                                    torch.from_numpy(outputs[0]), pred["matches0"]
+                                )
+                            )
+                            accepted = int((pred["matches0"] >= 0).sum())
+                            if limit == 0.0:
+                                self.assertEqual(accepted, 0)
+                            else:
+                                self.assertGreater(accepted, 0)
+                            for result, expected in zip(
+                                outputs[1:],
+                                (pred["matching_scores0"], pred["covisibility_score"]),
+                            ):
+                                torch.testing.assert_close(
+                                    torch.from_numpy(result),
+                                    expected,
+                                    rtol=1e-4,
+                                    atol=1e-5,
+                                )
 
     def test_fused_context_is_local_and_native_backward_works(self):
         export_model, native = TinyMatcher(), TinyMatcher()
