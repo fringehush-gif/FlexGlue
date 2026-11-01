@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Optional Torch/Triton RGB8 preparation for CUDA descriptors.
-
-Imported only by the opt-in descriptor path; no external image runtime is needed.
-"""
-from dataclasses import dataclass
+"""Optional Triton RGB8 preparation for CUDA descriptors."""
 from functools import lru_cache
 from typing import Optional, Union
 
@@ -12,30 +8,19 @@ import torch
 import triton
 import triton.language as tl
 
+from ._rgb8 import PreparedDescriptorInput as PreparedDescriptorInput
+from ._rgb8 import describe_prepared as describe_prepared
+from ._rgb8 import fp32_codebook as fp32_codebook
+from ._rgb8 import prepare_rgb8 as _prepare_rgb8
+from ._rgb8 import select_upload_pixels as select_upload_pixels
 
-def fp32_codebook() -> np.ndarray:
-    """FP32 values from float64(code)/255 for every uint8 code."""
-    values = np.arange(256, dtype=np.float64) / np.float64(255.0)
-    return values.astype(np.float32)
-
-
-def select_upload_pixels(rgb: np.ndarray) -> tuple[np.ndarray, int]:
-    """Borrow exact OpenCV BGR backing, or fall back to owning RGB bytes."""
-    if (
-        type(rgb) is not np.ndarray
-        or rgb.dtype != np.uint8
-        or rgb.ndim != 3
-        or rgb.shape[2] != 3
-    ):
-        raise ValueError("expected HWC RGB8 NumPy image")
-    width = rgb.shape[1]
-    if rgb.strides == (width * 3, 3, -1):
-        bgr = rgb[:, :, ::-1]
-        if bgr.flags.c_contiguous and np.shares_memory(bgr, rgb):
-            return bgr, 1
-    if rgb.flags.c_contiguous:
-        return rgb, 0
-    return np.array(rgb, dtype=np.uint8, copy=True, order="C"), 0
+__all__ = [
+    "PreparedDescriptorInput",
+    "describe_prepared",
+    "fp32_codebook",
+    "prepare_rgb8",
+    "select_upload_pixels",
+]
 
 
 @lru_cache(maxsize=1)
@@ -101,83 +86,13 @@ def _kernel():
     return resize
 
 
-@dataclass
-class PreparedDescriptorInput:
-    tensor: torch.Tensor
-    original_size: torch.Tensor
-    owners: tuple
-    producer_stream: torch.cuda.Stream
-
-    def require_current_stream(self) -> None:
-        current = torch.cuda.current_stream(self.tensor.device)
-        if current.cuda_stream != self.producer_stream.cuda_stream:
-            raise RuntimeError(
-                "descriptor input must be consumed on its producer stream"
-            )
-
-
-def prepare_rgb8(
-    rgb: np.ndarray,
-    *,
-    target_hw: tuple[int, int] = (512, 512),
-    device: Union[torch.device, str] = "cuda",
-    codebook_device: Optional[torch.Tensor] = None,
-) -> PreparedDescriptorInput:
-    if (
-        type(rgb) is not np.ndarray
-        or rgb.dtype != np.uint8
-        or rgb.ndim != 3
-        or rgb.shape[2] != 3
-    ):
-        raise ValueError("expected HWC RGB8 NumPy image")
-    src_h, src_w = (int(v) for v in rgb.shape[:2])
-    if not (
-        1 <= src_h <= 65535 and 1 <= src_w <= 65535 and src_h * src_w <= 64_000_000
-    ):
-        raise ValueError("source grid outside bounded prototype")
-    if (
-        not isinstance(target_hw, tuple)
-        or len(target_hw) != 2
-        or any(type(v) is not int or not 1 <= v <= 4096 for v in target_hw)
-        or target_hw[0] * target_hw[1] * 3 * 4 > 512 * 1024**2
-    ):
-        raise ValueError("target grid outside bounded prototype")
+def _resize_rgb8(source, table, target_hw, source_is_bgr):
+    src_h, src_w = source.shape[:2]
     dst_h, dst_w = target_hw
-    device = torch.device(device)
-    if device.type != "cuda":
-        raise ValueError("explicit CUDA device required")
-    current_index = torch.cuda.current_device()
-    if device.index not in (None, current_index):
-        raise ValueError("prototype requires the caller's current CUDA device")
-    device = torch.device("cuda", current_index)
-    stream = torch.cuda.current_stream(device)
-    host_pixels, source_is_bgr = select_upload_pixels(rgb)
-    # Blocking Torch copy owns device bytes before the borrowed host view can retire.
-    source = torch.from_numpy(host_pixels).to(device=device, non_blocking=False)
-    if (
-        source.dtype != torch.uint8
-        or source.shape != (src_h, src_w, 3)
-        or not source.is_contiguous()
-    ):
-        raise RuntimeError("RGB8 upload contract differs")
-    device = source.device
-    if codebook_device is None:
-        table = torch.from_numpy(fp32_codebook()).to(device=device, non_blocking=False)
-    else:
-        table = codebook_device
-        if (
-            not isinstance(table, torch.Tensor)
-            or table.device != device
-            or table.dtype != torch.float32
-            or tuple(table.shape) != (256,)
-            or not table.is_contiguous()
-        ):
-            raise ValueError("caller-owned codebook binding differs")
-    output = torch.empty((1, 3, dst_h, dst_w), dtype=torch.float32, device=device)
-    if output.stride() != (3 * dst_h * dst_w, dst_h * dst_w, dst_w, 1):
-        raise RuntimeError("output must have contiguous NCHW strides")
+    output = torch.empty(
+        (1, 3, dst_h, dst_w), dtype=torch.float32, device=source.device
+    )
     count = dst_h * dst_w * 3
-    # Installed Triton 3.8 CUDA backend uses Torch's current raw stream.
     # Request FMA contraction explicitly for the qualified interpolation order.
     # No libdevice FTZ is needed for this bounded normal-value interpolation.
     _kernel()[((count + 255) // 256,)](
@@ -196,27 +111,20 @@ def prepare_rgb8(
         enable_fp_fusion=True,
         enable_reflect_ftz=False,
     )
-    source.record_stream(stream)
-    table.record_stream(stream)
-    output.record_stream(stream)
-    size = torch.tensor([[src_w, src_h]], device=device, dtype=torch.float32)
-    return PreparedDescriptorInput(
-        output, size, (rgb, host_pixels, source, table), stream
+    return output
+
+
+def prepare_rgb8(
+    rgb: np.ndarray,
+    *,
+    target_hw: tuple[int, int] = (512, 512),
+    device: Union[torch.device, str] = "cuda",
+    codebook_device: Optional[torch.Tensor] = None,
+) -> PreparedDescriptorInput:
+    return _prepare_rgb8(
+        rgb,
+        target_hw=target_hw,
+        device=device,
+        codebook_device=codebook_device,
+        resize=_resize_rgb8,
     )
-
-
-@torch.no_grad()
-def describe_prepared(
-    descriptor, prepared: PreparedDescriptorInput, *, keypoints=None
-) -> dict:
-    prepared.require_current_stream()
-    x = prepared.tensor
-    features = descriptor.encode(x)
-    pred = {"features": features, "image_size": prepared.original_size.to(x)}
-    if keypoints is not None:
-        if descriptor.conf.describe:
-            pred["descriptors"] = descriptor.sample_descriptors(
-                features, keypoints, pred["image_size"]
-            )
-        pred["keypoints"] = keypoints
-    return pred

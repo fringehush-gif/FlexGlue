@@ -40,6 +40,7 @@ class FlexGlue(nn.Module):
         "describe_mp": None,  # optional resident fp16 descriptor network
         "mmap_weights": False,  # opt in to immutable local CPU checkpoint backing
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
+        "rgb8_backend": None,  # optional "torch", "torch-compile" or "triton"
         "rgb8_triton": False,  # opt-in direct RGB8 descriptor grid on supported CUDA
         "refine": False,  # refine with RoMa v2's dense refiners
         "refine_resize": (512, 512),  # refiner input, int: long side, (h, w): squash
@@ -74,6 +75,10 @@ class FlexGlue(nn.Module):
             raise ValueError("mmap_weights must be a bool.")
         if not isinstance(conf.rgb8_triton, bool):
             raise ValueError("rgb8_triton must be a bool.")
+        if conf.rgb8_backend not in (None, "torch", "torch-compile", "triton"):
+            raise ValueError(
+                "rgb8_backend must be None, 'torch', 'torch-compile' or 'triton'."
+            )
         self.stopping_layers(conf)  # validate before allocating/loading the model
         d, h = conf.descriptor_dim, conf.num_heads
         self.input_proj = nn.Linear(conf.input_dim, d)
@@ -265,7 +270,9 @@ class FlexGlue(nn.Module):
                         "No features: pass them or build FlexGlue(describe=True)."
                     )
                 image = data_i["image"]
-                if conf.rgb8_triton and isinstance(image, np.ndarray):
+                if (conf.rgb8_backend is not None or conf.rgb8_triton) and isinstance(
+                    image, np.ndarray
+                ):
                     if (
                         conf.refine
                         or image.ndim != 3
@@ -283,7 +290,9 @@ class FlexGlue(nn.Module):
                         )
                     else:
                         described = self.descriptor.describe_rgb8(
-                            image, resize=conf.describe_resize
+                            image,
+                            resize=conf.describe_resize,
+                            backend=conf.rgb8_backend or "triton",
                         )
                 else:
                     described = self.descriptor(
@@ -777,6 +786,10 @@ class FlexGlue(nn.Module):
         c = SimpleNamespace(**{**vars(self.conf), **conf})
         if not isinstance(c.rgb8_triton, bool):
             raise ValueError("rgb8_triton must be a bool.")
+        if c.rgb8_backend not in (None, "torch", "torch-compile", "triton"):
+            raise ValueError(
+                "rgb8_backend must be None, 'torch', 'torch-compile' or 'triton'."
+            )
         if not 0 <= c.n_layers <= self.conf.n_layers:
             raise ValueError(f"n_layers must be in [0, {self.conf.n_layers}].")
         self.require_heads((c.n_layers,))
