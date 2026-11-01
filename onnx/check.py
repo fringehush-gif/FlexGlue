@@ -271,6 +271,8 @@ def compare_points(pred, debug, tol):
 
 def time_session(session, feeds, warmup: int = 2, runs: int = 10) -> float:
     """Average run time in milliseconds."""
+    if runs <= 0 or warmup < 0:
+        raise ValueError("runs must be positive and warmup nonnegative.")
     for _ in range(warmup):
         session.run(None, feeds)
     t = time.time()

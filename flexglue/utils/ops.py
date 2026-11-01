@@ -255,9 +255,13 @@ def lattice_kde(
     points: torch.Tensor, weights: torch.Tensor, std: float
 ) -> torch.Tensor:
     """Weighted gaussian kde (B, N) of points (B, N, D) in [-1, 1] at themselves."""
+    if not math.isfinite(std) or std <= 0 or not 0 < std * std < math.inf:
+        raise ValueError("std must be finite and positive.")
     b, n, d = points.shape
     pitch = std / 2  # splat to a lattice, blur it, read it back: cost independent of N
     size = math.ceil(2 / pitch) + 2
+    if size**d > torch.iinfo(torch.int64).max:
+        raise ValueError("std produces an unrepresentable lattice.")
     u = ((points.float() + 1) / pitch).clamp(0, size - 1 - 1e-4)
     base, frac = u.floor().long(), u.frac()
     corners = torch.cartesian_prod(*[torch.arange(2, device=points.device)] * d)

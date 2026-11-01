@@ -69,6 +69,19 @@ class ImageConversionTest(unittest.TestCase):
                 self.assertEqual(actual.dtype, expected.dtype)
                 self.assertEqual(actual.stride(), expected.stride())
 
+    def test_empty_resize_and_nonpositive_targets_are_rejected(self):
+        from flexglue.utils.preprocess import check_resize, resize_image, resize_tensor
+
+        for shape in ((0, 0), (0, 3), (3, 0)):
+            with self.subTest(shape=shape):
+                with self.assertRaisesRegex(ValueError, "dimensions"):
+                    resize_tensor(torch.empty(1, 3, *shape), 32)
+                with self.assertRaisesRegex(ValueError, "dimensions"):
+                    resize_image(np.empty((*shape, 3), dtype=np.uint8), 32)
+        for target in (0, -32, (0, 32), (32, -1)):
+            with self.assertRaises(ValueError):
+                check_resize(target)
+
     def test_invalid_rank_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Not an image"):
             numpy_image_to_torch(np.zeros((2, 2, 2, 2), dtype=np.uint8))

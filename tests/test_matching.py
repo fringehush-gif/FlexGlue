@@ -28,6 +28,19 @@ class MatchingContractsTest(unittest.TestCase):
             for _ in range(2)
         ]
 
+    def test_invalid_attention_dimensions_fail_before_allocation(self):
+        for options in (
+            {"num_heads": 0},
+            {"num_heads": -1},
+            {"num_heads": True},
+            {"descriptor_dim": 0},
+            {"descriptor_dim": 15, "num_heads": 2},
+        ):
+            with self.subTest(options=options), self.assertRaises(ValueError), patch(
+                "torch.load", side_effect=AssertionError("loaded weights")
+            ):
+                FlexGlue(**options)
+
     def test_empty_compile_lengths_keep_eager_head(self):
         points = torch.zeros(1, 2, 2)
         features = torch.ones(1, 8, 2, 3)
