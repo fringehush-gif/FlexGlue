@@ -113,6 +113,20 @@ class ExportIsolationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.export.LayerScoresMatcherONNX(model, (2, 4))
 
+    def test_timing_rejects_zero_runs_before_session_execution(self):
+        if importlib.util.find_spec("onnxruntime") is None:
+            self.skipTest("optional dependency onnxruntime is unavailable")
+        path = Path(__file__).resolve().parents[1] / "onnx" / "check.py"
+        spec = importlib.util.spec_from_file_location("flexglue_check_test", path)
+        check = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"export": self.export}):
+            spec.loader.exec_module(check)
+        session = unittest.mock.Mock()
+        for runs, warmup in ((0, 2), (-1, 2), (1, -1)):
+            with self.subTest(runs=runs, warmup=warmup), self.assertRaises(ValueError):
+                check.time_session(session, {}, runs=runs, warmup=warmup)
+        session.run.assert_not_called()
+
     def test_early_stop_checker_rejects_wrong_score(self):
         if importlib.util.find_spec("onnxruntime") is None:
             self.skipTest("optional dependency onnxruntime is unavailable")

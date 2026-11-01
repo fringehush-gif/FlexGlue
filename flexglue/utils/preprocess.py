@@ -49,7 +49,7 @@ def check_resize(resize: Resize, edge_divisible_by: Optional[int] = None) -> Res
     d = edge_divisible_by or 1
     sides = (resize,) if isinstance(resize, int) else tuple(resize)
     valid = isinstance(resize, int) or len(sides) == 2
-    if not valid or any(not isinstance(s, int) or s % d for s in sides):
+    if not valid or any(not isinstance(s, int) or s <= 0 or s % d for s in sides):
         raise ValueError(
             f"resize must be an int or (h, w), divisible by {d}, got {resize}."
         )
@@ -61,6 +61,8 @@ def resize_tensor(
 ) -> torch.Tensor:
     """Bilinear resize of B x C x H x W: int keeps the aspect, (h, w) squashes."""
     h, w = img.shape[-2:]
+    if h == 0 or w == 0:
+        raise ValueError("image dimensions must be positive.")
     d = edge_divisible_by or 1
     if isinstance(check_resize(resize, d), int):  # long side, sides floored to d
         size = tuple(max(d, int(x * resize / max(h, w)) // d * d) for x in (h, w))
@@ -141,6 +143,8 @@ def resize_image(
 ) -> Tuple[np.ndarray, Tuple[float, float]]:
     """Resize an image to a fixed size, or according to max or min edge."""
     h, w = image.shape[:2]
+    if h == 0 or w == 0:
+        raise ValueError("image dimensions must be positive.")
 
     edge = {"max": max, "min": min}[fn]
     if isinstance(size, int):

@@ -81,6 +81,12 @@ class FlexGlue(nn.Module):
             )
         self.stopping_layers(conf)  # validate before allocating/loading the model
         d, h = conf.descriptor_dim, conf.num_heads
+        if type(h) is not int or h <= 0:
+            raise ValueError("num_heads must be a positive integer.")
+        if type(d) is not int or d <= 0 or d % (2 * h):
+            raise ValueError(
+                "descriptor_dim must be positive and divisible by 2 * num_heads."
+            )
         self.input_proj = nn.Linear(conf.input_dim, d)
         self.posenc = LearnableFourierPositionalEncoding(2, d // h)
         self.transformers = nn.ModuleList(

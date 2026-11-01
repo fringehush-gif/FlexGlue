@@ -30,6 +30,11 @@ def legacy_readout(logits, grid, hw, radius=1, k=512):
 
 
 class EntmaxReadoutTest(unittest.TestCase):
+    def test_invalid_kde_bandwidth_is_rejected(self):
+        for std in (0, -1, float("nan"), float("inf"), 5e-324, 1e-200, 1e-100, 1e308):
+            with self.subTest(std=std), self.assertRaisesRegex(ValueError, "std"):
+                ops.lattice_kde(torch.zeros(1, 2, 4), torch.ones(1, 2), std)
+
     def test_forward_matches_full_volume_reference(self):
         for dtype in (torch.float32, torch.float64):
             for batch, queries, h, w, radius, k in (
