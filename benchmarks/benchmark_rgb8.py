@@ -46,8 +46,8 @@ def main():
             # Reference: compile the full-resolution conversion/layout only.
             convert = torch.compile(rgb8_torch._convert_rgb8, dynamic=True)
 
-            def full_resize(source, lut, target_hw, bgr):
-                image = convert(source, lut, bgr)
+            def full_resize(source, lut, target_hw, bgr, converter=convert):
+                image = converter(source, lut, bgr)
                 if source.shape[:2] != target_hw:
                     image = F.interpolate(
                         image, size=target_hw, mode="bilinear", align_corners=False
@@ -89,8 +89,8 @@ def main():
                 result = function()
                 del result
         torch.cuda.synchronize()
-        samples = {name: [] for name in functions}
-        peaks = {name: [] for name in functions}
+        samples: dict[str, list[float]] = {name: [] for name in functions}
+        peaks: dict[str, list[int]] = {name: [] for name in functions}
         names = list(functions)
         for repeat in range(args.repeats):
             order = names if repeat % 2 == 0 else names[::-1]
