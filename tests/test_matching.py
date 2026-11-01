@@ -28,6 +28,46 @@ class MatchingContractsTest(unittest.TestCase):
             for _ in range(2)
         ]
 
+    def test_empty_compile_lengths_keep_eager_head(self):
+        points = torch.zeros(1, 2, 2)
+        features = torch.ones(1, 8, 2, 3)
+        expected = self.model.heads[0](points, features, features)
+        with patch("torch.compile", side_effect=lambda fn, **kwargs: fn):
+            self.model.compile(static_lengths=())
+        with patch.object(
+            self.model.heads[0],
+            "compiled_forward",
+            side_effect=AssertionError("compiled head"),
+        ):
+            actual = self.model.run_head(0, points, features, features)
+        for a, b in zip(expected, actual):
+            self.assertTrue(torch.equal(a, b))
+
+    def test_compile_lengths_keep_padding_and_large_query_fallback(self):
+        points = torch.zeros(1, 3, 2)
+        features = torch.ones(1, 8, 2, 3)
+        expected = self.model.run_head(0, points, features, features)
+        with patch("torch.compile", side_effect=lambda fn, **kwargs: fn):
+            self.model.compile(static_lengths=(2,))
+        with patch.object(
+            self.model.heads[0],
+            "compiled_forward",
+            side_effect=AssertionError("padded beyond maximum"),
+        ):
+            actual = self.model.run_head(0, points, features, features)
+        for a, b in zip(expected, actual):
+            self.assertTrue(torch.equal(a, b))
+        with patch("torch.compile", side_effect=lambda fn, **kwargs: fn):
+            self.model.compile(static_lengths=(4,))
+        with patch.object(
+            self.model.heads[0],
+            "compiled_forward",
+            wraps=self.model.heads[0].compiled_forward,
+        ) as head:
+            output = self.model.run_head(0, points, features, features)
+        self.assertEqual(head.call_args.args[0].shape[1], 4)
+        self.assertEqual(output[0].shape[1], 3)
+
     def test_sparse_empty_keypoints(self):
         for n0, n1 in ((0, 3), (3, 0), (0, 0)):
             for gemm in (False, True):

@@ -317,6 +317,14 @@ The descriptor returns float32 features and keypoint descriptors, so the matcher
 keeps its existing input type. The default descriptor remains float32; half
 precision can change individual matches and is not a CPU speed setting.
 
+### Reproducible sampling
+
+A fixed seed alone does not guarantee bitwise-identical CUDA results with KDE
+balancing. Repeated native runs can differ in the selected correspondences even
+with identical descriptors and RNG states. Setting `kde_balance=False` removes
+that balancing step and changes the sampling policy. Frontend parity tests use
+fixed keypoints or explicitly disable balancing to isolate preparation changes.
+
 ### Optional RGB8 descriptor preparation
 
 Choose `FlexGlue(rgb8_backend="torch")` for eager Torch preparation without

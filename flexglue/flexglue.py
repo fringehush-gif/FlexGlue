@@ -137,7 +137,7 @@ class FlexGlue(nn.Module):
         mode: str = "reduce-overhead",
         static_lengths: Tuple[int, ...] = (512, 1024, 2048, 4096),
     ) -> "FlexGlue":
-        """Compile the transformer layers and heads, as LightGlue's compile."""
+        """Compile transformer layers and heads; empty lengths keep heads eager."""
         for block in self.transformers:  # dense tokens: fixed size, no masks
             block.forward = torch.compile(block.forward, mode=mode, fullgraph=True)
         for head in self.heads:  # queries padded to static_lengths, eager beyond
@@ -410,7 +410,7 @@ class FlexGlue(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """heads[layer] on points (B, N, 2), padded to a static length if compiled."""
         n = points_ni.shape[1]
-        if self.static_lengths is None or n > self.static_lengths[-1]:
+        if not self.static_lengths or n > self.static_lengths[-1]:
             return self.heads[layer](points_ni, cf_i, cf_j)
         length = next(s for s in self.static_lengths if s >= n)
         points_ni = F.pad(points_ni, (0, 0, 0, length - n))  # rows are independent

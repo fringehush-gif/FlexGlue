@@ -135,16 +135,16 @@ def numpy_image_to_torch(image: np.ndarray) -> torch.Tensor:
 
 def resize_image(
     image: np.ndarray,
-    size: Union[List[int], int],
+    size: Union[List[int], Tuple[int, int], int],
     fn: str = "max",
-    interp: Optional[str] = "area",
-) -> np.ndarray:
+    interp: str = "area",
+) -> Tuple[np.ndarray, Tuple[float, float]]:
     """Resize an image to a fixed size, or according to max or min edge."""
     h, w = image.shape[:2]
 
-    fn = {"max": max, "min": min}[fn]
+    edge = {"max": max, "min": min}[fn]
     if isinstance(size, int):
-        scale = size / fn(h, w)
+        scale = size / edge(h, w)
         h_new, w_new = int(round(h * scale)), int(round(w * scale))
         scale = (w_new / w, h_new / h)
     elif isinstance(size, (tuple, list)):
@@ -161,7 +161,7 @@ def resize_image(
     return cv2.resize(image, (w_new, h_new), interpolation=mode), scale
 
 
-def load_image(path: Path, resize: int = None, **kwargs) -> torch.Tensor:
+def load_image(path: Path, resize: Optional[int] = None, **kwargs) -> torch.Tensor:
     image = read_image(path)
     if resize is not None:
         image, _ = resize_image(image, resize, **kwargs)
