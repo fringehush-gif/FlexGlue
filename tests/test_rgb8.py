@@ -4,6 +4,8 @@ Run with: python -m unittest discover -s tests -p test_rgb8.py
 Optional Linux CUDA checks: set FLEXGLUE_TEST_RGB8_CUDA=1 explicitly.
 """
 import builtins
+import copy
+import functools
 import importlib.util
 import os
 import sys
@@ -158,6 +160,29 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
         self.assertIsNotNone(self.descriptor.backbone.conv.weight.grad)
         self.assertTrue(torch.isfinite(self.descriptor.backbone.conv.weight.grad).all())
 
+    def test_compilation_preserves_copied_descriptor_weights(self):
+        matcher = tiny_matcher()
+        real_compile = torch.compile
+        with patch(
+            "torch.compile",
+            side_effect=lambda fn, **kw: real_compile(
+                fn, backend="eager", fullgraph=True
+            ),
+        ):
+            matcher.compile()
+        descriptor = matcher.descriptor
+        copied = copy.deepcopy(descriptor)
+        image = numpy_image_to_torch(self.image)
+        with torch.no_grad():
+            before = descriptor.describe(image)["features"].clone()
+            torch.testing.assert_close(copied.describe(image)["features"], before)
+            copied.backbone.conv.weight.add_(1)
+            self.assertFalse(torch.equal(copied.describe(image)["features"], before))
+            torch.testing.assert_close(descriptor.describe(image)["features"], before)
+            torch.testing.assert_close(
+                descriptor.describe_rgb8(self.image)["features"], before
+            )
+
     def test_invalid_direct_inputs_are_rejected(self):
         for image in (
             self.image.astype(np.float32),
@@ -300,6 +325,74 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 self.assertPacketEqual(expected_pixels, prepared.tensor)
                 self.assertPacketEqual(self.descriptor({"image": image}), actual)
                 torch.cuda.synchronize()
+
+    def test_descriptor_compilation_covers_both_input_routes(self):
+        from flexglue.utils import rgb8_triton
+
+        matcher = tiny_matcher().cuda()
+        descriptor = matcher.descriptor
+        descriptor.conf.resize = (512, 512)
+        encoding = compiling = 0
+        compiled_encoding = False
+        original_encode = descriptor.encode
+
+        def observe_encode(receiver, *args, **kwargs):
+            nonlocal encoding, compiled_encoding
+            compiled_encoding |= compiling > 0
+            encoding += 1
+            try:
+                return original_encode(*args, **kwargs)
+            finally:
+                encoding -= 1
+
+        descriptor.encode = observe_encode.__get__(descriptor)
+
+        def track_compile(fn, **kwargs):
+            @functools.wraps(fn)
+            def run(*args, **kw):
+                nonlocal compiling, compiled_encoding
+                compiled_encoding |= encoding > 0
+                compiling += 1
+                try:
+                    return fn(*args, **kw)
+                finally:
+                    compiling -= 1
+
+            return run
+
+        with patch("torch.compile", side_effect=track_compile):
+            matcher.compile()
+        rgb = np.arange(513 * 769 * 3, dtype=np.uint32).astype(np.uint8)
+        rgb = rgb.reshape(513, 769, 3)
+        with torch.inference_mode():
+            descriptor.describe(numpy_image_to_torch(rgb).cuda())
+            tensor_compiled = compiled_encoding
+            compiled_encoding = False
+            with patch.object(
+                rgb8_triton, "prepare_rgb8", wraps=rgb8_triton.prepare_rgb8
+            ) as prepare:
+                descriptor.describe_rgb8(rgb)
+            prepare.assert_called_once()
+            # Both are eager today; future descriptor compilation must reach both.
+            self.assertEqual(
+                tensor_compiled,
+                compiled_encoding,
+                "Descriptor compilation must cover tensor and accelerated RGB8 inputs",
+            )
+
+    def test_cached_features_survive_subsequent_images(self):
+        matcher = tiny_matcher().cuda().compile()
+        descriptor = matcher.descriptor
+        descriptor.conf.resize = (512, 512)
+        rgb = np.arange(513 * 769 * 3, dtype=np.uint32).astype(np.uint8)
+        rgb = rgb.reshape(513, 769, 3)
+        with torch.inference_mode():
+            first = descriptor.describe_rgb8(rgb)["features"]
+            saved = first.clone()
+            for later in (rgb[:, ::-1, :], np.bitwise_xor(rgb, 127)):
+                torch.compiler.cudagraph_mark_step_begin()
+                descriptor.describe_rgb8(later)
+                self.assertPacketEqual(first, saved)
 
     def test_disabled_sparse_description_preserves_keypoints(self):
         from flexglue.utils import rgb8_triton
