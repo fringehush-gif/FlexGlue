@@ -296,6 +296,7 @@ Batching has a few requirements:
 - ```describe_mp```: Optional built-in descriptor precision. ```"float16"``` stores its backbone and feature head in half precision; preprocessing, output features, and the matcher keep their existing dtypes. Default: ```None``` (float32 descriptor).
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```rgb8_triton```: Experimental direct RGB8 preparation for the CUDA descriptor; accepts HWC RGB8 NumPy inputs when enabled. Default: False.
+- ```rgb8_backend```: Optional RGB8 preparation: ```"torch"```, ```"torch-compile"``` or ```"triton"```. Default: ```None``` (use ```rgb8_triton```); an explicit backend overrides that legacy flag.
 - ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True. The GEMM and exact paths select by summed squared endpoint errors; the fallback selects by mean endpoint distance. Both threshold the mean endpoint distance.
 - ```exact_nn```: With ```gemm_nn```, compute the squared distances from coordinate differences instead of one matrix multiplication: slower but exact, also where float32 matrix multiplications run in TF32. Default: False.
 - ```query_chunk_size```: Points per correspondence-head call, bounds memory without changing results. None processes all points at once. Default: 4096.
@@ -317,6 +318,23 @@ keeps its existing input type. The default descriptor remains float32; half
 precision can change individual matches and is not a CPU speed setting.
 
 ### Optional RGB8 descriptor preparation
+
+Choose `FlexGlue(rgb8_backend="torch")` for eager Torch preparation without
+importing Triton, or `rgb8_backend="torch-compile"` to compile its conversion and
+layout operations. Interpolation stays in native Torch to preserve its arithmetic
+order. The compiled option uses Torch's compiler stack (which may require
+Triton), has first-use compilation cost, and can specialize on new image shapes.
+Compiler/runtime errors propagate. Torch may revert to eager execution when its
+shape-specialization limit is reached. This option does not compile the
+descriptor network or change `FlexGlue.compile()`.
+
+Both Torch options upload uint8 pixels and reuse the existing descriptor encoder.
+For integer downscales, they compact the sample lattice before creating FP32
+pixels: bilinear interpolation reads the same central samples in each cell.
+Odd factors keep the zero-weight neighbour as well. Noninteger scales, upscales
+and small integer factors retain the full conversion. This reduces temporary
+memory only on eligible grids; it is not a general speedup over the fused Triton
+kernel. Native Windows CUDA parity remains unmeasured.
 
 For unbatched HWC RGB8 NumPy images, `rgb8_triton=True` can avoid transferring a
 full-resolution float image before building the descriptor grid:
@@ -341,7 +359,7 @@ The flag is off by default and can also be overridden per match. Existing Torch
 inputs and feature packets retain their original path. `describe_rgb8` is an
 explicit direct-descriptor API; do not mutate NumPy pixels during upload.
 
-The accelerated route requires Linux/WSL, a CUDA descriptor on the current
+The Triton route requires Linux/WSL, a CUDA descriptor on the current
 device, eval mode, disabled gradients, the `(512, 512)` descriptor grid and a
 compatible installed Triton runtime. Missing Triton, CPU, other platforms,
 training/grad mode, other resize settings, ndarray subclasses and source rasters
@@ -351,7 +369,25 @@ added; optional kernel/runtime errors still propagate. Native Windows runtime
 parity has not been measured. The derived codebook is not serialized and is
 invalidated by module device/dtype transforms.
 
-On one RTX 3080 Ti, a fixed 11-image/12-edge graph with cached descriptors and
+The Torch backends use the same inference, image-size and resize guards, without
+the Linux-only restriction. CPU, training/grad mode and unsupported input/resize
+settings retain the original Torch path. The default remains off. To disable a
+legacy `rgb8_triton=True` per call, pass `rgb8_triton=False` along with
+`rgb8_backend=None`.
+
+The generated preparation benchmark separates first-call cost from warm,
+interleaved wall time and peak Torch allocations, and checks bitwise pixels:
+
+```bash
+python benchmarks/benchmark_rgb8.py --backends torch torch-compile torch-full-compile triton
+```
+
+`torch-full-compile` is the full-resolution conversion reference; it is not a
+matcher backend. The benchmark includes blocking upload, preparation and the
+final CUDA drain, excluding decode and descriptor/matcher inference.
+See [sample measurements and their limits](benchmarks/rgb8_torch.json).
+
+For the Triton route, a fixed 11-image/12-edge graph on one RTX 3080 Ti with cached descriptors and
 warm filesystem/kernel caches took **1.230 → 1.124 s** at a 1536-pixel image cap
 and **2.830 → 2.167 s** at 3072 (CTTC, two observations per arm). This includes
 decode, upload, descriptors, matching and the final CUDA drain. Torch allocated
@@ -362,17 +398,19 @@ FP32 readout. These are warm graph results, not constructor, repeated raw-pair
 matching or cold-start measurements. Exact parity is qualified for Torch
 2.14.1+cu132, Triton 3.8.0, NumPy 2.5.3 and OpenCV 5.0; other stacks remain
 unqualified. See [the benchmark receipt](benchmarks/rgb8_triton.json).
+These graph measurements do not establish end-to-end gains for the Torch options.
 
 Portable generated tests need neither Triton nor a checkpoint:
 
 ```bash
-python -m unittest discover -s tests -p test_rgb8.py
+python -m unittest discover -s tests -p 'test_rgb8*.py'
 # Optional, only on a compatible Linux CUDA stack:
-FLEXGLUE_TEST_RGB8_CUDA=1 python -m unittest discover -s tests -p test_rgb8.py
+FLEXGLUE_TEST_RGB8_CUDA=1 python -m unittest discover -s tests -p 'test_rgb8*.py'
 ```
 
-The CUDA test skips unless explicitly enabled and Linux CUDA/Triton are
-available. CPU tests cover the original Torch fallback, including actual
+CUDA tests skip unless explicitly enabled. The legacy Triton tests also require
+Linux CUDA/Triton; Torch CUDA checks require CUDA, and compiled cases need a
+working Torch compiler backend. CPU tests cover the original Torch fallback, including actual
 matching, with small generated modules and images. They do not load model
 weights or download data. Weight licensing is unchanged; the DINOv3 backbone
 weights remain subject to the license described below.
