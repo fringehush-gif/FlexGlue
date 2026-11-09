@@ -6,6 +6,7 @@ Adapted from the official implementation and weights:
     Viktor Larsson, Anders Heyden, Fredrik Kahl, Mårten Wadenbäck, Michael Felsberg
     ECCV 2026, https://arxiv.org/abs/2511.15706
     Code: https://github.com/Parskatt/RoMaV2 (MIT License)
+    Copyright (c) 2025 Johan Edstedt
 """
 
 from typing import Dict, Optional, Tuple
