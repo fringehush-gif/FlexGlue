@@ -9,6 +9,7 @@ Adapted from the official implementation and weights:
     Copyright (c) 2025 Johan Edstedt
 """
 
+from functools import partial
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -53,8 +54,9 @@ class VGG19BN(nn.Module):
                 c_in = c_out
             layers.append(nn.MaxPool2d(2, 2))
         self.layers = nn.ModuleList(layers)
-        mean, std = torch.tensor([0.485, 0.456, 0.406]), torch.tensor(
-            [0.229, 0.224, 0.225]
+        mean, std = (
+            torch.tensor([0.485, 0.456, 0.406]),
+            torch.tensor([0.229, 0.224, 0.225]),
         )
         self.register_buffer("mean", mean[:, None, None], persistent=False)
         self.register_buffer("std", std[:, None, None], persistent=False)
@@ -97,9 +99,11 @@ class ConvRefiner(nn.Module):
         disp_dim: int,
         radius: Optional[int],
         hidden_blocks: int = 8,
+        correlation=local_correlation,
     ) -> None:
         super().__init__()
         self.radius = radius
+        self.correlation = correlation
         dim = 2 * proj_dim + disp_dim + (0 if radius is None else (2 * radius + 1) ** 2)
         self.proj = nn.Linear(feat_dim, proj_dim)
         self.block1 = Block(dim)
@@ -131,7 +135,7 @@ class ConvRefiner(nn.Module):
         )
         x = [ops.to_chw(f_i), f_ji, self.disp_emb(displacement)]
         if self.radius is not None:
-            x.append(local_correlation(x[0], ops.to_chw(f_j), warp, self.radius))
+            x.append(self.correlation(x[0], ops.to_chw(f_j), warp, self.radius))
         z = self.hidden_blocks(self.block1(torch.cat(x, 1))).float()
         delta = ops.to_hwc(self.warp_head(z))
         d = ops.to_hwc(self.confidence_head(z))
@@ -155,12 +159,27 @@ class RoMav2Refiner(nn.Module):
     # stride: (feature dim, projection dim, displacement embed dim, correlation radius)
     configs = {4: (256, 192, 79, 3), 2: (128, 48, 23, 1), 1: (64, 12, 8, None)}
 
-    def __init__(self, scales: Tuple[int, ...] = (4, 2, 1), weights: str = url) -> None:
+    def __init__(
+        self,
+        scales: Tuple[int, ...] = (4, 2, 1),
+        weights: str = url,
+        correlation_backend: str = "torch",
+    ) -> None:
         super().__init__()
+        if correlation_backend not in ("torch", "triton"):
+            raise ValueError("correlation_backend must be 'torch' or 'triton'.")
+        correlation = local_correlation
+        if correlation_backend == "triton":
+            from .utils.correlation_triton import local_correlation as fused
+
+            correlation = partial(fused, native=local_correlation)
         self.scales = scales
         self.features = VGG19BN()
         self.refiners = nn.ModuleDict(
-            {str(s): ConvRefiner(*self.configs[s]) for s in scales}
+            {
+                str(s): ConvRefiner(*self.configs[s], correlation=correlation)
+                for s in scales
+            }
         )
         own = {}  # only the refiner part of RoMa v2's official checkpoint
         for k, v in ops.load_state_dict(weights, "").items():

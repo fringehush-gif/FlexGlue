@@ -513,3 +513,17 @@ If you use any ideas from the paper or code from this repo, please consider citi
   year      = {2026}
 }
 ```
+
+### Optional refinement correlation
+
+`FlexGlue(refine=True, refine_correlation="triton")` fuses eager CUDA local
+correlation without materializing sampled features. This requires Triton; the
+default `"torch"` backend has no extra dependency. Unsupported shapes, layouts,
+dtypes, gradients and externally compiled refinement retain native Torch
+correlation. `FlexGlue.compile()` compiles the matcher, not the refiner.
+Both correlation backends share model parameters and checkpoints.
+
+`FlexGlue(readout_backend="triton")` optionally fuses eager FP32 entmax
+threshold arithmetic. It keeps Torch cumulative sums and window readout.
+Other inputs and compiled heads use native Torch; the default remains `"torch"`.
+Both backend choices are fixed at model construction.

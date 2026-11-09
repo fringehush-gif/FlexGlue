@@ -1,5 +1,6 @@
 """FlexGlue: Sparse-to-Dense Matching and Visual Disambiguation."""
 
+from functools import partial
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
@@ -44,6 +45,8 @@ class FlexGlue(nn.Module):
         "rgb8_triton": False,  # opt-in direct RGB8 descriptor grid on supported CUDA
         "refine": False,  # refine with RoMa v2's dense refiners
         "refine_resize": (512, 512),  # refiner input, int: long side, (h, w): squash
+        "readout_backend": "torch",  # optional eager threshold fusion: "triton"
+        "refine_correlation": "torch",  # optional eager CUDA correlation: "triton"
         "refine_scales": (2, 1),  # RoMa refiner strides, coarse to fine
         "coarse_stride": 8,  # coarse grid pitch, pixels of the resized image (8: cells)
         "max_num_samples": 5000,  # matches sampled from the grids without keypoints
@@ -58,6 +61,8 @@ class FlexGlue(nn.Module):
         "describe_mp",
         "mmap_weights",
         "refine_scales",
+        "refine_correlation",
+        "readout_backend",
         "query_chunk_size",
         "input_dim",
         "descriptor_dim",
@@ -79,6 +84,15 @@ class FlexGlue(nn.Module):
             raise ValueError(
                 "rgb8_backend must be None, 'torch', 'torch-compile' or 'triton'."
             )
+        if conf.refine_correlation not in ("torch", "triton"):
+            raise ValueError("refine_correlation must be 'torch' or 'triton'.")
+        if conf.readout_backend not in ("torch", "triton"):
+            raise ValueError("readout_backend must be 'torch' or 'triton'.")
+        threshold = ops.sorted_entmax15_threshold
+        if conf.readout_backend == "triton":
+            from .utils.entmax_triton import threshold as fused_threshold
+
+            threshold = partial(fused_threshold, native=threshold)
         self.stopping_layers(conf)  # validate before allocating/loading the model
         d, h = conf.descriptor_dim, conf.num_heads
         if type(h) is not int or h <= 0:
@@ -95,7 +109,13 @@ class FlexGlue(nn.Module):
         # heads[k] reads the features after k transformer layers, heads[0] the raw ones
         self.heads = nn.ModuleList(
             [
-                MatchHead(d, conf.search_dim, conf.query_chunk_size, cross=k > 0)
+                MatchHead(
+                    d,
+                    conf.search_dim,
+                    conf.query_chunk_size,
+                    cross=k > 0,
+                    threshold=threshold,
+                )
                 for k in range(conf.n_layers + 1)
             ]
         )
@@ -135,7 +155,13 @@ class FlexGlue(nn.Module):
             else None
         )
         del state_dict
-        self.refiner = RoMav2Refiner(conf.refine_scales) if conf.refine else None
+        self.refiner = (
+            RoMav2Refiner(
+                conf.refine_scales, correlation_backend=conf.refine_correlation
+            )
+            if conf.refine
+            else None
+        )
         self.static_lengths: Optional[Tuple[int, ...]] = None  # set by compile
 
     def compile(
@@ -533,8 +559,9 @@ class FlexGlue(nn.Module):
         for i, j in ((0, 1), (1, 0)):
             if f"confidence{i}" not in pred:
                 continue
-            size_i, size_j = self.descriptor_size(data[i]), self.descriptor_size(
-                data[j]
+            size_i, size_j = (
+                self.descriptor_size(data[i]),
+                self.descriptor_size(data[j]),
             )
             border_i = size_i.new_full(size_i.shape[:1], conf.remove_border_px)
             border_j = size_j.new_full(size_j.shape[:1], conf.remove_border_px)
@@ -561,8 +588,9 @@ class FlexGlue(nn.Module):
         for i, j in ((0, 1), (1, 0)):
             if f"dense_confidence{i}" not in pred:
                 continue
-            size_i, size_j = self.descriptor_size(data[i]), self.descriptor_size(
-                data[j]
+            size_i, size_j = (
+                self.descriptor_size(data[i]),
+                self.descriptor_size(data[j]),
             )
             border_i = size_i.new_full(size_i.shape[:1], conf.remove_border_px)
             border_j = size_j.new_full(size_j.shape[:1], conf.remove_border_px)
@@ -606,8 +634,9 @@ class FlexGlue(nn.Module):
                 "matching_scores0": pred["confidence0"].new_zeros(kpts0.shape[:2]),
                 "matching_scores1": pred["confidence1"].new_zeros(kpts1.shape[:2]),
             }
-        kpts0, kpts1 = self.to_descriptor(kpts0, data0), self.to_descriptor(
-            kpts1, data1
+        kpts0, kpts1 = (
+            self.to_descriptor(kpts0, data0),
+            self.to_descriptor(kpts1, data1),
         )
         p2d0_i1 = self.to_descriptor(pred["p2d0_i1"], data1)
         p2d1_i0 = self.to_descriptor(pred["p2d1_i0"], data0)

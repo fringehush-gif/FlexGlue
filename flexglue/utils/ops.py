@@ -171,12 +171,20 @@ def entmax15_threshold(
     return tau
 
 
-def entmax15_window_readout(logits, grid, hw, radius: int = 1, k: int = 512) -> tuple:
+def entmax15_window_readout(
+    logits,
+    grid,
+    hw,
+    radius: int = 1,
+    k: int = 512,
+    *,
+    threshold=sorted_entmax15_threshold,
+) -> tuple:
     """1.5-entmax expected position (B, N, 2) and mass (B, N) around the argmax."""
     if logits.shape[-1] > k:  # maximum and threshold from the same (sorted) top-k
         topv, topi = logits.topk(k, dim=-1)
         vmax, idx = topv[..., :1], topi[..., :1]
-        tau = sorted_entmax15_threshold((topv - vmax) / 2)
+        tau = threshold((topv - vmax) / 2)
     else:
         vmax, idx = logits.max(-1, keepdim=True)
         tau = entmax15_threshold((logits - vmax) / 2, k)
