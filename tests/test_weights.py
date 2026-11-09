@@ -279,7 +279,7 @@ class WeightLoadingTest(unittest.TestCase):
             torch.hub, "load_state_dict_from_url", return_value={"matcher.x": 1}
         ) as load:
             self.assertEqual(ops.load_state_dict(url, "matcher."), {"x": 1})
-            load.assert_called_once_with(url, map_location="cpu")
+            load.assert_called_once_with(url, map_location="cpu", weights_only=True)
 
     def test_standalone_matcher_reads_once(self):
         with patch.object(torch, "load", wraps=torch.load) as load:

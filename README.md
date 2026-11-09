@@ -380,3 +380,7 @@ If you use any ideas from the paper or code from this repo, please consider citi
   year      = {2026}
 }
 ```
+
+URL checkpoints use restricted deserialization too. The hub loader must accept
+`weights_only=True`; an older helper refuses that URL call rather than retrying
+unrestricted loading. An already downloaded local checkpoint remains supported.
