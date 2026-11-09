@@ -30,11 +30,11 @@ class FlexGlue(nn.Module):
         "n_layers": 9,
         "num_heads": 8,
         "filter_threshold": 0.1,  # min match confidence
-        "max_distance_px": 3.0,  # max cycle error, pixels of the resized image
+        "max_distance_px": 3.0,  # max cycle error, pixels of the descriptor input
         "min_covisibility": 0.0,  # invalidate matches if covisibility_score is below
         "early_stop_layers": None,  # intermediate checks; None: every layer, (): none
         "early_stop_decay": None,  # in [0, 1): decay per earlier layer (0: no decay)
-        "remove_border_px": 0.0,  # border margin, pixels of the resized image
+        "remove_border_px": 0.0,  # border margin, pixels of the descriptor input
         "mp": "float16",  # transformer dtype: float16, bfloat16 or None (fp32)
         "describe": True,  # build a DINOv3Descriptor for inputs without features
         "describe_mp": None,  # optional resident fp16 descriptor network
@@ -400,11 +400,15 @@ class FlexGlue(nn.Module):
         hw = (f0.shape[-2:], f1.shape[-2:])
         context = self.pair_context(x0, x1, hw, layer, covisibility_score)
         if conf.refine:
-            fine = tuple(
-                self.refiner.extract(d["image"], resize=conf.refine_resize)
-                for d in (data0, data1)
-            )
-            context = context._replace(fine=fine)
+            fine = []
+            for data in (data0, data1):
+                features = data.get("fine_features")
+                if features is None:
+                    features = self.refiner.extract(
+                        data["image"], resize=conf.refine_resize
+                    )
+                fine.append(features)
+            context = context._replace(fine=tuple(fine))
         return context
 
     def run_head(
@@ -521,7 +525,7 @@ class FlexGlue(nn.Module):
     def gate_points(
         self, pred: dict, context: PairContext, data0: dict, data1: dict, conf
     ) -> dict:
-        """Pair, cycle and border checks on keypoints as valid{i}."""
+        """Pair, cycle and border checks on keypoints (valid{i}), in resized pixels."""
         data = (data0, data1)
         is_covisible = context.covisibility_score >= conf.min_covisibility
         if ops.is_set(conf.min_covisibility):

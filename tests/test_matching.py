@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -123,6 +123,36 @@ class MatchingContractsTest(unittest.TestCase):
         with patch.object(self.model, "grid_correspondences", return_value={}) as grid:
             self.model.prepare_dense(context, *self.data, [(0, 1)], conf)
         grid.assert_called_once()
+
+    def test_refinement_reuses_each_supplied_feature_packet(self):
+        self.model.refiner = torch.nn.Module()
+        self.model.refiner.extract = Mock(return_value={"fallback": torch.ones(1)})
+        cached = [{"cached": torch.ones(1)}, {"cached": torch.zeros(1)}]
+        conf = self.model.resolve_conf({"refine": True})
+        for missing in (None, 0, 1):
+            with self.subTest(missing=missing):
+                self.model.refiner.extract.reset_mock()
+                inputs = [
+                    {**data, "fine_features": features}
+                    for data, features in zip(self.data, cached)
+                ]
+                if missing is not None:
+                    inputs[missing]["fine_features"] = None
+                    inputs[missing]["image"] = torch.zeros(2, 3, 8, 8)
+                context = self.model.decode_pair(*inputs, conf)
+                for i in (0, 1):
+                    expected = (
+                        self.model.refiner.extract.return_value
+                        if i == missing
+                        else cached[i]
+                    )
+                    self.assertIs(context.fine[i], expected)
+                if missing is None:
+                    self.model.refiner.extract.assert_not_called()
+                else:
+                    self.model.refiner.extract.assert_called_once_with(
+                        inputs[missing]["image"], resize=conf.refine_resize
+                    )
 
 
 if __name__ == "__main__":
