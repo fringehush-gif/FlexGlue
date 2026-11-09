@@ -8,6 +8,61 @@ from flexglue import FlexGlue
 
 
 class DescriptorFrameTest(unittest.TestCase):
+    def test_to_resized_preserves_frame_precision_for_point_dtypes(self):
+        for width in (8192, 8193):
+            data = {
+                "features": torch.zeros(1, 1, 1, width),
+                "image_size": torch.tensor([[65536.0, 8.0]], dtype=torch.float32),
+            }
+            size = self.model.descriptor_size(data)
+            original_size = data["image_size"].clone()
+            original_frame = size.clone()
+            for dtype in (
+                torch.float16,
+                torch.bfloat16,
+                torch.float32,
+                torch.float64,
+                torch.int64,
+            ):
+                with self.subTest(width=width, dtype=dtype):
+                    points = torch.tensor([[[2, 4]]], dtype=dtype)
+                    if dtype.is_floating_point:
+                        points.requires_grad_()
+                    expected = points * (size / data["image_size"])[:, None, :]
+                    for supplied in (None, size):
+                        actual = self.model.to_resized(points, data, supplied)
+                        self.assertEqual(
+                            actual.dtype, torch.promote_types(dtype, torch.float32)
+                        )
+                        self.assertTrue(torch.isfinite(actual).all())
+                        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                        if dtype.is_floating_point:
+                            actual_grad = torch.autograd.grad(
+                                actual.sum(), points, retain_graph=True
+                            )[0]
+                            expected_grad = torch.autograd.grad(
+                                expected.sum(), points, retain_graph=True
+                            )[0]
+                            torch.testing.assert_close(
+                                actual_grad, expected_grad, atol=0, rtol=0
+                            )
+            self.assertTrue(torch.equal(data["image_size"], original_size))
+            self.assertTrue(torch.equal(size, original_frame))
+
+    def test_to_resized_retains_double_division_precision(self):
+        data = {
+            "features": torch.zeros(1, 1, 1, 8192),
+            "image_size": torch.tensor([[65535.0, 7.0]], dtype=torch.float32),
+        }
+        points = torch.tensor([[[2.0, 4.0]]], dtype=torch.float64)
+        frame = self.model.descriptor_size(data)
+        expected = points * (frame.double() / data["image_size"])[:, None, :]
+        actual = self.model.to_resized(points, data)
+        self.assertEqual(actual.dtype, torch.float64)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        rounded = points * (frame / data["image_size"])[:, None, :]
+        self.assertFalse(torch.equal(actual, rounded))
+
     def test_geometry_precision_is_independent_of_feature_precision(self):
         points = torch.tensor([[[319.25, 271.125]]], dtype=torch.float64)
         size = torch.tensor([[1536, 1024]])
@@ -17,9 +72,10 @@ class DescriptorFrameTest(unittest.TestCase):
                 "features": torch.zeros(1, 4, 2, 4, dtype=dtype),
                 "image_size": size,
             }
-            actual = self.model.to_descriptor(points, data)
-            self.assertEqual(actual.dtype, points.dtype)
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            for descriptor_size in (None, self.model.descriptor_size(data)):
+                actual = self.model.to_resized(points, data, descriptor_size)
+                self.assertEqual(actual.dtype, points.dtype)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def setUp(self):
         self.model = FlexGlue(
@@ -162,6 +218,46 @@ class DescriptorFrameTest(unittest.TestCase):
             torch.equal(out["dense_valid0"], torch.tensor([[[False, True]]]))
         )
 
+    def test_dense_cycle_threshold_uses_each_source_frame(self):
+        # Opposite anisotropic frames: both return errors are (2, 2) pixels.
+        for threshold, expected in ((2.8, False), (2.9, True)):
+            pred = {
+                "dense_p2d0_n1": torch.tensor([[[[0.25, 0.125]]]]),
+                "dense_p2d1_n0": torch.tensor([[[[0.125, 0.25]]]]),
+                "dense_p2d0_i1": self.data1["keypoints"][:, None],
+                "dense_p2d1_i0": self.data0["keypoints"][:, None],
+                "dense_confidence0": torch.ones(1, 1, 1),
+                "dense_confidence1": torch.ones(1, 1, 1),
+            }
+            conf = SimpleNamespace(
+                min_covisibility=0.0,
+                remove_border_px=0.0,
+                max_distance_px=threshold,
+                filter_threshold=0.0,
+            )
+            out = self.model.gate_dense(
+                pred, self.context, self.data0, self.data1, conf
+            )
+            for i in (0, 1):
+                with self.subTest(threshold=threshold, direction=i):
+                    self.assertEqual(out[f"dense_valid{i}"].item(), expected)
+
+    def test_bidirectional_gates_reuse_dimensions(self):
+        pred = {
+            "confidence0": torch.ones(1, 1),
+            "confidence1": torch.ones(1, 1),
+            "p2d0_i1": self.data1["keypoints"],
+            "p2d1_i0": self.data0["keypoints"],
+        }
+        conf = SimpleNamespace(
+            min_covisibility=0.0, remove_border_px=0.0, max_distance_px=0.0
+        )
+        with patch.object(
+            self.model, "descriptor_size", wraps=self.model.descriptor_size
+        ) as size:
+            self.model.gate_points(pred, self.context, self.data0, self.data1, conf)
+            self.assertEqual(size.call_count, 2)
+
     def test_batch_scales_original_sizes_independently(self):
         data = {
             "features": torch.zeros(2, 4, 2, 4),
@@ -169,7 +265,7 @@ class DescriptorFrameTest(unittest.TestCase):
         }
         points = torch.tensor([[[64.0, 16.0]], [[32.0, 32.0]]])
         expected = torch.tensor([[[16.0, 8.0]], [[16.0, 8.0]]])
-        self.assertTrue(torch.equal(self.model.to_descriptor(points, data), expected))
+        self.assertTrue(torch.equal(self.model.to_resized(points, data), expected))
 
     def test_square_uniform_frame_has_original_gate(self):
         data = {

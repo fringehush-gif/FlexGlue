@@ -181,7 +181,7 @@ matcher = FlexGlue(describe_resize=(640, 640)).eval().cuda()
 
 Inputs per image (`inputs0`, `inputs1`), as returned by `DINOv3Descriptor.describe`, merged with a LightGlue detector:
 - `features`: `(B, 256, h, w)` stride-8 feature map.
-- `image_size`: `(B, 2)` image size `(w, h)` in pixels.
+- `image_size`: `(B, 2)` image size `(w, h)` in pixels. Integer or floating-point sizes compatible with the feature and keypoint dtypes are accepted; descriptor input dimensions are derived from the feature grid.
 - `image`: `(B, 3, H, W)` the image, read by the refiner when refinement features are not supplied.
 - `fine_features`: Optional refinement features from `matcher.refiner.extract(image, resize=matcher.conf.refine_resize)`. Reuse only for the same image, refiner weights, resize, strides, device and dtype; keep the packet unchanged while it is in use. Either image can supply them independently.
 - `keypoints`: `(B, M, 2)` keypoints in pixels, optional.

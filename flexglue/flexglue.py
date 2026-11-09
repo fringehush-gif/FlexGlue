@@ -331,7 +331,7 @@ class FlexGlue(nn.Module):
                         {"image": image}, resize=conf.describe_resize
                     )
                 data_i = {**described, **data_i}
-            out.append(data_i)
+            out.append({**data_i})
         return tuple(out)
 
     def prepare_dense(
@@ -543,9 +543,14 @@ class FlexGlue(nn.Module):
             -1,
         )
 
-    def to_descriptor(self, points: torch.Tensor, data_i: dict) -> torch.Tensor:
-        """Convert original image pixels to descriptor input pixels."""
-        scale = self.descriptor_size(data_i).to(points) / data_i["image_size"]
+    def to_resized(
+        self, points: torch.Tensor, data_i: dict, size: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Points (B, ..., 2) from pixels of image i to descriptor input pixels."""
+        if size is None:
+            size = self.descriptor_size(data_i)
+        dtype = torch.promote_types(points.dtype, torch.float32)
+        scale = size.to(device=points.device, dtype=dtype) / data_i["image_size"]
         return points * scale.view(scale.shape[0], *[1] * (points.dim() - 2), 2)
 
     def gate_points(
@@ -553,18 +558,19 @@ class FlexGlue(nn.Module):
     ) -> dict:
         """Pair, cycle and border checks on keypoints (valid{i}), in resized pixels."""
         data = (data0, data1)
+        sizes = None
         is_covisible = context.covisibility_score >= conf.min_covisibility
         if ops.is_set(conf.min_covisibility):
             pred["is_covisible"] = is_covisible
         for i, j in ((0, 1), (1, 0)):
             if f"confidence{i}" not in pred:
                 continue
-            size_i, size_j = (
-                self.descriptor_size(data[i]),
-                self.descriptor_size(data[j]),
-            )
-            border_i = size_i.new_full(size_i.shape[:1], conf.remove_border_px)
-            border_j = size_j.new_full(size_j.shape[:1], conf.remove_border_px)
+            if sizes is None:
+                sizes = (self.descriptor_size(data0), self.descriptor_size(data1))
+            size_i, size_j = sizes[i], sizes[j]
+            border = size_i.new_full(size_i.shape[:1], conf.remove_border_px)
+            kpts_ri = self.to_resized(data[i]["keypoints"], data[i], size_i)
+            p2di_rj = self.to_resized(pred[f"p2d{i}_i{j}"], data[j], size_j)
             valid = is_covisible[:, None]
             valid = valid & ops.inside_border(
                 self.to_descriptor(data[i]["keypoints"], data[i]), size_i, border_i
@@ -582,22 +588,22 @@ class FlexGlue(nn.Module):
     ) -> dict:
         """Pair, filter, cycle and border gates on grid confidence."""
         data = (data0, data1)
+        sizes = None
         is_covisible = context.covisibility_score >= conf.min_covisibility
         if conf.min_covisibility > 0:
             pred["is_covisible"] = is_covisible
         for i, j in ((0, 1), (1, 0)):
             if f"dense_confidence{i}" not in pred:
                 continue
-            size_i, size_j = (
-                self.descriptor_size(data[i]),
-                self.descriptor_size(data[j]),
-            )
-            border_i = size_i.new_full(size_i.shape[:1], conf.remove_border_px)
-            border_j = size_j.new_full(size_j.shape[:1], conf.remove_border_px)
+            if sizes is None:
+                sizes = (self.descriptor_size(data0), self.descriptor_size(data1))
+            size_i, size_j = sizes[i], sizes[j]
+            border = size_i.new_full(size_i.shape[:1], conf.remove_border_px)
             dense_p2di_nj = pred[f"dense_p2d{i}_n{j}"]
             dense_confidence = pred[f"dense_confidence{i}"]
             dense_p2di_ni = ops.grid_sources(dense_p2di_nj)
-            dense_p2di_ii = ops.denormalize_keypoints(dense_p2di_ni, size_i)
+            dense_p2di_ri = ops.denormalize_keypoints(dense_p2di_ni, size_i)
+            dense_p2di_rj = self.to_resized(pred[f"dense_p2d{i}_i{j}"], data[j], size_j)
             valid = is_covisible[:, None, None]
             valid = valid & (dense_confidence >= conf.filter_threshold)
             valid &= ops.inside_border(dense_p2di_ii, size_i, border_i)
@@ -634,18 +640,27 @@ class FlexGlue(nn.Module):
                 "matching_scores0": pred["confidence0"].new_zeros(kpts0.shape[:2]),
                 "matching_scores1": pred["confidence1"].new_zeros(kpts1.shape[:2]),
             }
-        kpts0, kpts1 = (
-            self.to_descriptor(kpts0, data0),
-            self.to_descriptor(kpts1, data1),
-        )
-        p2d0_i1 = self.to_descriptor(pred["p2d0_i1"], data1)
-        p2d1_i0 = self.to_descriptor(pred["p2d1_i0"], data0)
+        size0, size1 = self.descriptor_size(data0), self.descriptor_size(data1)
+        kpts0 = self.to_resized(data0["keypoints"], data0, size0)
+        kpts1 = self.to_resized(data1["keypoints"], data1, size1)
+        p2d0_i1 = self.to_resized(pred["p2d0_i1"], data1, size1)
+        p2d1_i0 = self.to_resized(pred["p2d1_i0"], data0, size0)
         if conf.gemm_nn:  # centered on each image for float32 precision
             c0, c1 = (self.descriptor_size(d)[:, None] / 2 for d in (data0, data1))
             x = torch.cat([p2d0_i1 - c1, kpts0 - c0], -1)
             y = torch.cat([kpts1 - c1, p2d1_i0 - c0], -1)
             sq_dist = ops.sq_dist if conf.exact_nn else ops.sq_dist_gemm
-            m0, m1 = ops.mutual_nn(sq_dist(x, y))
+            dist = sq_dist(x, y)
+        else:
+            dist = 0.5 * (torch.cdist(p2d0_i1, kpts1) + torch.cdist(kpts0, p2d1_i0))
+        # Rejected nonfinite predictions must not steal finite mutual neighbors.
+        # Selection and threshold checks are discrete; no distance gradients escape.
+        dist = dist.detach()
+        dist.nan_to_num_(nan=torch.inf, posinf=torch.inf, neginf=torch.inf)
+        m0, m1 = ops.mutual_nn(dist)
+
+        if conf.gemm_nn:
+            del dist  # Selected-pair distances below do not need the full matrix.
 
             # exact mean distance of the selected pairs only
             def take(t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
@@ -660,8 +675,6 @@ class FlexGlue(nn.Module):
                 + (take(kpts0, m1) - p2d1_i0).norm(dim=-1)
             )
         else:
-            dist = 0.5 * (torch.cdist(p2d0_i1, kpts1) + torch.cdist(kpts0, p2d1_i0))
-            m0, m1 = ops.mutual_nn(dist)
             dist0, dist1 = dist.min(2).values, dist.min(1).values
         # geometric mean of both confidences, as the cycle score
         scores0 = (
