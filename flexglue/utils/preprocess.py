@@ -41,17 +41,17 @@ def resize_images(
     ]
     if len({tuple(im.shape[-2:]) for im in resized}) > 1:
         raise ValueError("Images of different sizes need a (h, w) resize to batch.")
-    return torch.cat(resized)
+    return resized[0] if len(resized) == 1 else torch.cat(resized)
 
 
 def check_resize(resize: Resize, edge_divisible_by: Optional[int] = None) -> Resize:
-    """Raise unless resize is an int (long side) or (h, w), divisible if given."""
+    """Require positive resize sides, divisible by the given factor if any."""
     d = edge_divisible_by or 1
     sides = (resize,) if isinstance(resize, int) else tuple(resize)
     valid = isinstance(resize, int) or len(sides) == 2
     if not valid or any(not isinstance(s, int) or s <= 0 or s % d for s in sides):
         raise ValueError(
-            f"resize must be an int or (h, w), divisible by {d}, got {resize}."
+            f"resize must be a positive int or (h, w), divisible by {d}, got {resize}."
         )
     return resize
 
@@ -125,10 +125,8 @@ def numpy_image_to_torch(image: np.ndarray) -> torch.Tensor:
     else:
         raise ValueError(f"Not an image: {image.shape}")
     if type(image) is np.ndarray and image.dtype == np.uint8:
-        # A true FP32 divide matches the old uint8 -> FP64 divide -> FP32
-        # rounding for all 256 codes in the qualified NumPy runtime. Copy
-        # first to handle OpenCV's negative-stride RGB channel view and keep
-        # the result independent of the caller's pixels.
+        # Copy handles negative strides and keeps caller pixels independent.
+        # The FP32 division matches the previous FP64 path for all byte values.
         output = np.array(image, dtype=np.float32, copy=True, order="K")
         np.divide(output, np.float32(255), out=output)
         return torch.as_tensor(output)
@@ -148,11 +146,16 @@ def resize_image(
 
     edge = {"max": max, "min": min}[fn]
     if isinstance(size, int):
+        if size <= 0:
+            raise ValueError("resize dimensions must be positive.")
         scale = size / edge(h, w)
-        h_new, w_new = int(round(h * scale)), int(round(w * scale))
+        h_new = max(1, int(round(h * scale)))
+        w_new = max(1, int(round(w * scale)))
         scale = (w_new / w, h_new / h)
     elif isinstance(size, (tuple, list)):
         h_new, w_new = size
+        if h_new <= 0 or w_new <= 0:
+            raise ValueError("resize dimensions must be positive.")
         scale = (w_new / w, h_new / h)
     else:
         raise ValueError(f"Incorrect new size: {size}")
