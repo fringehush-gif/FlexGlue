@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -8,6 +9,7 @@ from flexglue.utils.preprocess import (
     check_resize,
     numpy_image_to_torch,
     resize_image,
+    resize_images,
     resize_tensor,
 )
 
@@ -144,6 +146,81 @@ class ImageConversionTest(unittest.TestCase):
     def test_invalid_rank_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Not an image"):
             numpy_image_to_torch(np.zeros((2, 2, 2, 2), dtype=np.uint8))
+
+
+class ResizeImagesTest(unittest.TestCase):
+    def test_singleton_matches_cat_values_gradients_and_storage(self):
+        for batch in (1, 2):
+            for target in ((4, 6), (3, 5)):
+                with self.subTest(batch=batch, target=target):
+                    base = torch.arange(batch * 3 * 4 * 6, dtype=torch.float32)
+                    source = base.reshape(batch, 3, 4, 6).requires_grad_()
+                    expected = torch.cat(
+                        [
+                            torch.nn.functional.interpolate(
+                                source, target, mode="bilinear", align_corners=False
+                            )
+                        ]
+                    )
+                    with mock.patch("torch.cat", wraps=torch.cat) as cat:
+                        actual = resize_images(source, target)
+                    cat.assert_not_called()
+                    self.assertTrue(torch.equal(actual, expected))
+                    self.assertEqual(actual.shape, expected.shape)
+                    self.assertNotEqual(
+                        actual.untyped_storage().data_ptr(),
+                        source.untyped_storage().data_ptr(),
+                    )
+                    weights = torch.arange(actual.numel()).reshape(actual.shape)
+                    ga = torch.autograd.grad(
+                        (actual * weights).sum(), source, retain_graph=True
+                    )[0]
+                    ge = torch.autograd.grad((expected * weights).sum(), source)[0]
+                    self.assertTrue(torch.equal(ga, ge))
+                    before = source.detach().clone()
+                    actual.detach().fill_(0)
+                    self.assertTrue(torch.equal(source.detach(), before))
+
+    def test_list_batching_and_empty_behavior(self):
+        images = [torch.ones(3, 4, 6), torch.full((3, 4, 6), 2.0)]
+        expected = torch.cat(
+            [
+                torch.nn.functional.interpolate(
+                    x[None], (3, 5), mode="bilinear", align_corners=False
+                )
+                for x in images
+            ]
+        )
+        with mock.patch("torch.cat", wraps=torch.cat) as cat:
+            actual = resize_images(images, (3, 5))
+        cat.assert_called_once()
+        self.assertTrue(torch.equal(actual, expected))
+        with self.assertRaises((RuntimeError, ValueError)):
+            resize_images([], (3, 5))
+        with self.assertRaisesRegex(ValueError, "different sizes"):
+            resize_images([torch.ones(3, 4, 6), torch.ones(3, 6, 4)], 6)
+
+    def test_same_size_still_interpolates_nonfinite_values(self):
+        source = torch.tensor(
+            [[[[float("inf"), -float("inf")], [float("nan"), -0.0]]]]
+        ).expand(1, 3, 2, 2)
+        expected = torch.cat(
+            [
+                torch.nn.functional.interpolate(
+                    source, (2, 2), mode="bilinear", align_corners=False
+                )
+            ]
+        )
+        with mock.patch(
+            "flexglue.utils.preprocess.F.interpolate",
+            wraps=torch.nn.functional.interpolate,
+        ) as interpolate:
+            actual = resize_images([source], (2, 2))
+        interpolate.assert_called_once()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+        self.assertNotEqual(
+            actual.untyped_storage().data_ptr(), source.untyped_storage().data_ptr()
+        )
 
 
 if __name__ == "__main__":
