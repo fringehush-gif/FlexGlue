@@ -23,6 +23,13 @@ from .utils.modules import (
 WEIGHTS_URL = "https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue.pth"
 
 
+def _compile_method(method, **kwargs):
+    # Keep self explicit so deepcopy rebinds every compiled method's owner.
+    if isinstance(method, MethodType):
+        return torch.compile(method.__func__, **kwargs).__get__(method.__self__)
+    return torch.compile(method, **kwargs)
+
+
 class FlexGlue(nn.Module):
     default_conf = {
         "input_dim": 256,
@@ -101,28 +108,20 @@ class FlexGlue(nn.Module):
     ) -> "FlexGlue":
         """Compile the encoder, transformer layers, heads and optional refiners."""
         if self.descriptor is not None:
-            encode = self.descriptor.encode
-            if isinstance(encode, MethodType) and encode.__self__ is self.descriptor:
-                # Keep self explicit so deepcopy binds to the copied weights.
-                compiled = torch.compile(
-                    encode.__func__, mode="default", fullgraph=True
-                )
-                self.descriptor.encode = compiled.__get__(self.descriptor)
-            else:
-                self.descriptor.encode = torch.compile(
-                    encode, mode="default", fullgraph=True
-                )
+            self.descriptor.encode = _compile_method(
+                self.descriptor.encode, mode="default", fullgraph=True
+            )
         if self.refiner is not None:
-            self.refiner.features.forward = torch.compile(
+            self.refiner.features.forward = _compile_method(
                 self.refiner.features.forward, mode=mode, fullgraph=True
             )
-            self.refiner.forward = torch.compile(
+            self.refiner.forward = _compile_method(
                 self.refiner.forward, mode=mode, fullgraph=True
             )
         for block in self.transformers:  # dense tokens: fixed size, no masks
-            block.forward = torch.compile(block.forward, mode=mode, fullgraph=True)
+            block.forward = _compile_method(block.forward, mode=mode, fullgraph=True)
         for head in self.heads:  # queries padded to static_lengths, eager beyond
-            head.compiled_forward = torch.compile(
+            head.compiled_forward = _compile_method(
                 head.forward, mode=mode, fullgraph=True
             )
         self.static_lengths = tuple(sorted(static_lengths))
