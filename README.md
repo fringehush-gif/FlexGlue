@@ -298,6 +298,10 @@ feature modules must accept `scales`, or their refiner must implement
 `extract_selected`; replacement refiners need that method to use the option.
 Supplied `fine_features` bypass extraction and need stride 1 plus every
 configured stride. A selected cache may lack levels required by another refiner.
+Both sides must have matching spatial feature grids at each refinement stride,
+including when caches are supplied. Unequal grids now raise ValueError instead
+of applying ambiguous pixel units. Use a fixed (height, width) refine_resize for
+image extraction, or rebuild both supplied caches on matching grids.
 
 For repeated images, reuse the existing `fine_features` input. Compiled feature
 outputs can be overwritten by later graph generations: clone each image's

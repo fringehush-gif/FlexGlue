@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from flexglue.flexglue import FlexGlue
-from flexglue.refiner import VGG19BN, RoMav2Refiner
+from flexglue.refiner import VGG19BN, ConvRefiner, RoMav2Refiner
 
 
 def tiny():
@@ -301,6 +301,46 @@ class SelectedFeaturesTest(unittest.TestCase):
                                 value, expected[s], rtol=0, atol=0
                             )
                             self.assertTrue(torch.isfinite(value).all())
+
+
+class RefinerSpatialContractTest(unittest.TestCase):
+    def test_unequal_grids_rejected_before_projection(self):
+        model = ConvRefiner(2, 2, 2, radius=1, hidden_blocks=0).eval()
+        source = torch.ones(1, 3, 3, 2)
+        for target_shape in ((1, 3, 9, 2), (1, 9, 3, 2), (1, 2, 2, 2)):
+            with self.subTest(target_shape=target_shape):
+                calls = []
+                hook = model.proj.register_forward_pre_hook(
+                    lambda module, args: calls.append(1)
+                )
+                try:
+                    with self.assertRaisesRegex(ValueError, "matching feature sizes"):
+                        model(
+                            source,
+                            torch.ones(target_shape),
+                            torch.zeros(1, 3, 3, 2),
+                            torch.zeros(1, 3, 3, 1),
+                            (1.0, 1.0),
+                        )
+                    self.assertEqual(calls, [])
+                finally:
+                    hook.remove()
+
+    def test_equal_rectangular_grids_are_supported(self):
+        model = ConvRefiner(2, 2, 2, radius=1, hidden_blocks=0).eval()
+        for shape in ((1, 3, 9, 2), (2, 9, 3, 2)):
+            with self.subTest(shape=shape), torch.inference_mode():
+                warp, logits = model(
+                    torch.ones(shape),
+                    torch.zeros(shape),
+                    torch.zeros(shape),
+                    torch.zeros(*shape[:3], 1),
+                    (1.0, 1.0),
+                )
+                self.assertEqual(warp.shape, shape)
+                self.assertEqual(logits.shape, (*shape[:3], 4))
+                self.assertTrue(torch.isfinite(warp).all())
+                self.assertTrue(torch.isfinite(logits).all())
 
 
 if __name__ == "__main__":

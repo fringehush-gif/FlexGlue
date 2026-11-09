@@ -125,6 +125,12 @@ class ConvRefiner(nn.Module):
         scale_factor: Tuple[float, float],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         h, w = f_i.shape[1:3]
+        if f_j.shape[1:3] != (h, w):
+            raise ValueError(
+                "RoMa refinement requires matching feature sizes. "
+                "Use a fixed (height, width) refine_resize for image extraction, "
+                "or rebuild supplied fine_features on matching grids."
+            )
         f_i, f_j = self.proj(f_i.float()), self.proj(f_j.float())
         f_ji = F.grid_sample(ops.to_chw(f_j), warp, align_corners=False)
         grid = ops.cell_centers(h, w, scale=(w, h), device=warp.device)
