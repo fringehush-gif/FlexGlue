@@ -33,7 +33,7 @@ class FlexGlue(nn.Module):
         "filter_threshold": 0.1,  # min match confidence
         "max_distance_px": 3.0,  # max cycle error, pixels of the descriptor input
         "min_covisibility": 0.0,  # invalidate matches if covisibility_score is below
-        "early_stop_layers": None,  # intermediate checks; None: every layer, (): none
+        "early_stop_layers": None,  # None: every intermediate layer; (): none
         "early_stop_decay": None,  # in [0, 1): decay per earlier layer (0: no decay)
         "remove_border_px": 0.0,  # border margin, pixels of the descriptor input
         "mp": "float16",  # transformer dtype: float16, bfloat16 or None (fp32)

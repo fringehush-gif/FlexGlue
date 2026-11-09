@@ -294,9 +294,9 @@ Batching has a few requirements:
 - ```filter_threshold```: Minimum match confidence. Default: 0.1.
 - ```max_distance_px```: Maximum cycle error, or mutual nearest-neighbor distance in sparse mode, in pixels of the descriptor input. Non-positive values or None disable it. Default: 3.0.
 - ```min_covisibility```: Reject all matches of pairs with a lower ```covisibility_score```, e.g. 0.8 for noisy image sets. Default: 0.0 (off).
-- ```early_stop_decay```: Stop after layer ```k``` if ```covisibility_score < min_covisibility * (1 - early_stop_decay) ** (9 - k)```, lower stops earlier. Default: None (off).
-- ```early_stop_layers```: Intermediate layers to check, e.g. `(2, 4, 6, 8)` to match the released ONNX schedule. Default: `None` (every intermediate layer); `()` disables intermediate checks. Layers at or beyond a per-call `n_layers` are ignored; the decay exponent still uses the full model depth.
-- ```remove_border_px```: Drop matches this close to the border, in pixels of the descriptor input. Default: 0.0.
+- ```early_stop_decay```: Stop after layer ```k``` if ```covisibility_score < min_covisibility * (1 - early_stop_decay) ** (n_layers - k)```, lower stops earlier. Default: None (off).
+- ```early_stop_layers```: Intermediate layers to check, e.g. `(2, 4, 6, 8)` for the released ONNX schedule. Default `None` checks each intermediate layer; `()` checks none. Checks beyond a per-call `n_layers` are ignored; the exponent uses the full model depth.
+- ```remove_border_px```: Drop matches this close to the border, in pixels of the descriptor input (as ```max_distance_px```). Default: 0.0.
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
 - ```describe_mp```: Optional resident `"float16"` descriptor backbone and feature head; `None` keeps the float32 descriptor. Default: `None`.
 - ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; other configurations use ordinary loading. Checkpoint read errors still propagate. Default: False.
@@ -506,11 +506,12 @@ python onnx/check.py --descriptor onnx/models/flexglue_descriptor.onnx \
 `onnx/check.py` can check any exported model, e.g. those of the release, against a PyTorch checkpoint (`--weights`).
 The exported matcher has no refinement and uses the fused attention and GELU operators of ONNX Runtime (`--no_fused_attention` exports standard ONNX operators instead).
 By default, it runs all transformer layers. With `--early_stop_layers 2,4,6,8`, it stops early on pairs that are confidently not covisible, as `early_stop_decay` does in PyTorch:
-- After each listed layer `k`, it rejects the pair without running the remaining layers if its covisibility score is below `min_covisibility * (1 - early_stop_decay) ** (9 - k)`.
+- After each listed layer `k`, it rejects the pair without running the remaining layers if its covisibility score is below `min_covisibility * (1 - early_stop_decay) ** (n_layers - k)`.
 - The checks are ONNX `If` nodes, and `early_stop_decay` is an additional input of the model. 1 never stops early.
+- New exports record their layer count and descriptor stride for the checker. Unannotated v0.1 graphs use nine layers and stride eight. Native PyTorch callers can choose the same schedule with `early_stop_layers=(2, 4, 6, 8)`; the default still checks every intermediate layer.
 - On the exhaustive pairs of ETH3D with `min_covisibility=0.8` and `early_stop_decay=0.5`, this skips most of the computation of 42% of the pairs and practically never rejects a pair that would pass `min_covisibility` (0.08% of them).
 
-The matchers of the v0.1 release were exported at different stages: [`flexglue_matcher_early_stop.onnx`](https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue_matcher_early_stop.onnx) and [`flexglue_matcher_early_stop_fp16.onnx`](https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue_matcher_early_stop_fp16.onnx), used by COLMAP, with the fused GELU operator and `--early_stop_layers 2,4,6,8`; `flexglue_matcher{,_fp16}.onnx` earlier, without the fused GELU operator, which only changes the outputs by float rounding. Exporting the early-stopping matchers again with `export.py` gives the same graphs, but not byte-identical files, since the graphs also store the source location of each node.
+The matchers of the v0.1 release were exported at different stages: [`flexglue_matcher_early_stop.onnx`](https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue_matcher_early_stop.onnx) and [`flexglue_matcher_early_stop_fp16.onnx`](https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue_matcher_early_stop_fp16.onnx), used by COLMAP, with the fused GELU operator and `--early_stop_layers 2,4,6,8`; `flexglue_matcher{,_fp16}.onnx` earlier, without the fused GELU operator, which only changes the outputs by float rounding. The Python ONNX example and checker adapt matcher input coordinates to descriptor frames for historical and current graphs. Re-exported graphs can differ from historical release graphs in their distance geometry and are not byte-identical.
 
 ## Checklist
 

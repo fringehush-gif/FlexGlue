@@ -70,7 +70,9 @@ import contextlib
 import copy
 import hashlib
 import re
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -490,32 +492,72 @@ def early_stop_check(k: int, n_layers: int, outputs, continue_branch):
     return stop_condition(prefix, score, n_layers - k) + [if_node]
 
 
-def read_early_stop_layers(graphs):
-    """Read every stop from its score input, independent of If-node names.
-
-    The matcher exporter emits If only for early stopping. Refuse unknown
-    predicates rather than comparing an incomplete schedule.
-    """
+def read_early_stop_layers(graphs, n_layers=9):
+    """Read only the supported score/decay predicates, independent of node names."""
     layers = []
     for graph in graphs:
         producers = {output: node for node in graph.node for output in node.output}
-        for node in graph.node:
-            if node.op_type != "If":
+
+        def node(value, op):
+            result = producers.get(value)
+            return result if result is not None and result.op_type == op else None
+
+        def scalar(value):
+            constant = node(value, "Constant")
+            if constant is None:
+                return None
+            for attr in constant.attribute:
+                if attr.name == "value":
+                    value = onnx.numpy_helper.to_array(helper.get_attribute_value(attr))
+                    return float(value) if value.size == 1 else None
+            return None
+
+        for conditional in graph.node:
+            if conditional.op_type != "If":
                 continue
-            condition = producers.get(node.input[0]) if len(node.input) == 1 else None
-            score = (
-                condition.input[0]
-                if condition is not None
-                and condition.op_type == "Less"
-                and len(condition.input) == 2
-                else ""
+            condition = (
+                node(conditional.input[0], "Less")
+                if len(conditional.input) == 1
+                else None
             )
-            match = re.fullmatch(r"covisibility_score_layer(\d+)", score)
-            if match is None:
+            inputs = condition.input if condition is not None else ()
+            match = (
+                re.fullmatch(r"covisibility_score_layer(\d+)", inputs[0])
+                if len(inputs) == 2
+                else None
+            )
+            layer = int(match.group(1)) if match else 0
+            mul = node(inputs[1], "Mul") if match else None
+            factors = list(mul.input) if mul is not None else []
+            gamma = next((v for v in factors if v != "min_covisibility"), None)
+            power = node(gamma, "Pow") if gamma is not None else None
+            exponent = (
+                scalar(power.input[1])
+                if power is not None and len(power.input) == 2
+                else None
+            )
+            sub = (
+                node(power.input[0], "Sub")
+                if power is not None and len(power.input) == 2
+                else None
+            )
+            valid_sub = (
+                sub is not None
+                and len(sub.input) == 2
+                and sub.input[1] == "early_stop_decay"
+                and scalar(sub.input[0]) == 1.0
+            )
+            if (
+                not 0 < layer < n_layers
+                or len(factors) != 2
+                or factors.count("min_covisibility") != 1
+                or exponent != n_layers - layer
+                or not valid_sub
+            ):
                 raise ValueError(
                     "Cannot identify every early-stop predicate in this graph."
                 )
-            layers.append(int(match.group(1)))
+            layers.append(layer)
     if len(layers) != len(set(layers)):
         raise ValueError("The graph has duplicate early-stop stages.")
     return sorted(layers)
@@ -648,8 +690,8 @@ KEYPOINT_DIMS = {
 }
 
 
-def make_keypoint_dims_dynamic(path: Path):
-    """Remove shapes specialized to the dummy number of keypoints.
+def finalize_matcher_graph(path: Path, n_layers: int, stride: int):
+    """Record the matcher contract and remove specialized keypoint shapes.
 
     The exporter may annotate intermediate values (value_info) and outputs with
     the concrete number of keypoints of the dummy inputs. ONNX Runtime uses
@@ -658,6 +700,11 @@ def make_keypoint_dims_dynamic(path: Path):
     Clear the intermediate annotations and name the dynamic dimensions.
     """
     model = onnx.load(str(path))
+    metadata = {entry.key: entry.value for entry in model.metadata_props}
+    metadata.update(
+        {"flexglue.n_layers": str(n_layers), "flexglue.stride": str(stride)}
+    )
+    helper.set_model_props(model, metadata)
     del model.graph.value_info[:]
     for value in list(model.graph.input) + list(model.graph.output):
         if value.name in KEYPOINT_DIMS:
@@ -678,7 +725,12 @@ def export_matcher(
     debug_outputs: bool = False,
     early_stop_layers=None,
 ):
-    """Export a copy of the matcher (the export modifies it in place)."""
+    """Export a copy of the matcher (the export modifies it in place).
+
+    Publish a complete single-file graph by replacement, following destination
+    symlinks and retaining existing permission bits. Other file metadata and ACLs
+    follow the new file and its directory; concurrent writers are unsupported.
+    """
     check_layers = (
         ()
         if early_stop_layers is None
@@ -704,28 +756,35 @@ def export_matcher(
     n1 = torch.export.Dim("num_keypoints1", min=2, max=65536)
     dynamic_shapes = {name: None for name in MATCHER_INPUTS}
     dynamic_shapes["kpts0"], dynamic_shapes["kpts1"] = {1: n0}, {1: n1}
-    with exportable(matcher, fused):
-        torch.onnx.export(
-            model,
-            inputs,
-            str(path),
-            input_names=MATCHER_INPUTS,
-            output_names=output_names,
-            dynamic_shapes=dynamic_shapes,
-            opset_version=opset,
-            dynamo=True,
-            verbose=False,
-            external_data=False,
-            custom_translation_table={
-                torch.ops.flexglue.multi_head_attention.default: (
-                    multi_head_attention_onnx
-                ),
-                torch.ops.flexglue.gelu.default: gelu_onnx,
-            },
-        )
-    make_keypoint_dims_dynamic(path)
-    if check_layers:
-        add_early_stopping(path, check_layers, matcher.conf.n_layers)
+    # Publish only a complete graph; preserve an existing destination on failure.
+    path = Path(path).resolve()
+    with tempfile.TemporaryDirectory(dir=path.parent) as temporary:
+        staged = Path(temporary) / path.name
+        with exportable(matcher, fused):
+            torch.onnx.export(
+                model,
+                inputs,
+                str(staged),
+                input_names=MATCHER_INPUTS,
+                output_names=output_names,
+                dynamic_shapes=dynamic_shapes,
+                opset_version=opset,
+                dynamo=True,
+                verbose=False,
+                external_data=False,
+                custom_translation_table={
+                    torch.ops.flexglue.multi_head_attention.default: (
+                        multi_head_attention_onnx
+                    ),
+                    torch.ops.flexglue.gelu.default: gelu_onnx,
+                },
+            )
+        finalize_matcher_graph(staged, matcher.conf.n_layers, matcher.stride)
+        if check_layers:
+            add_early_stopping(staged, check_layers, matcher.conf.n_layers)
+        if path.exists():
+            shutil.copymode(path, staged)
+        staged.replace(path)
 
 
 def parse_args():

@@ -44,6 +44,7 @@ from export import (  # noqa: E402
     export_matcher,
     read_early_stop_layers,
 )
+from match_pair import matcher_input_feeds, matcher_stride  # noqa: E402
 
 from flexglue import DINOv3Descriptor, FlexGlue  # noqa: E402
 from flexglue.flexglue import WEIGHTS_URL  # noqa: E402
@@ -97,8 +98,16 @@ def matcher_options(path: Path):
     """Options of an exported matcher, to export the equivalent debug graph."""
     model = onnx.load(str(path))
     graphs = list(subgraphs(model.graph))
+    metadata = {entry.key: entry.value for entry in model.metadata_props}
+    # Released graphs predate metadata and use nine layers with stride eight.
+    n_layers = int(metadata.get("flexglue.n_layers", "9"))
+    if n_layers < 0:
+        raise ValueError("Matcher layer count must be nonnegative.")
+    stride = matcher_stride(metadata)
+    early_stop = "early_stop_decay" in [i.name for i in model.graph.input]
     return SimpleNamespace(
-        size=input_size(model, "features0", stride=8),
+        n_layers=n_layers,
+        size=input_size(model, "features0", stride=stride),
         opset=next(o.version for o in model.opset_import if o.domain == ""),
         fp16=any(
             init.data_type == onnx.TensorProto.FLOAT16
@@ -110,8 +119,10 @@ def matcher_options(path: Path):
             for g in graphs
             for node in g.node
         ),
-        early_stop="early_stop_decay" in [i.name for i in model.graph.input],
-        early_stop_layers=read_early_stop_layers(graphs),
+        early_stop=early_stop,
+        early_stop_layers=(
+            read_early_stop_layers(graphs, n_layers) if early_stop else []
+        ),
     )
 
 
@@ -271,8 +282,8 @@ def compare_points(pred, debug, tol):
 
 def time_session(session, feeds, warmup: int = 2, runs: int = 10) -> float:
     """Average run time in milliseconds."""
-    if runs <= 0 or warmup < 0:
-        raise ValueError("runs must be positive and warmup nonnegative.")
+    if warmup < 0 or runs <= 0:
+        raise ValueError("warmup must be nonnegative and runs must be positive")
     for _ in range(warmup):
         session.run(None, feeds)
     t = time.time()
@@ -285,9 +296,10 @@ def check_matches(sessions, matcher, features, kpts, min_covisibility, tol, timi
     """Compare the matchers on one pair of images and keypoints."""
     pred = match_pytorch(matcher, *features, *kpts, min_covisibility)
     feeds = matcher_feeds(*features, *kpts, min_covisibility)
-    match_feeds = feeds
+    match_feeds = dict(feeds)
     if sessions.early_stop:  # early_stop_decay=1 never stops early
-        match_feeds = {**feeds, "early_stop_decay": np.array(1.0, np.float32)}
+        match_feeds["early_stop_decay"] = np.array(1.0, np.float32)
+    match_feeds = matcher_input_feeds(sessions.matcher, match_feeds)
     outputs = sessions.matcher.run(None, match_feeds)
     ok, message = compare_matches(pred, outputs, tol)
     if min_covisibility == 0:  # otherwise, the points may not be computed
@@ -307,7 +319,7 @@ def check_matches(sessions, matcher, features, kpts, min_covisibility, tol, timi
     if sessions.early_stop and min_covisibility > 0:
         for decay in EARLY_STOP_DECAYS:
             ok &= check_early_stop(
-                sessions.matcher, matcher, features, kpts, feeds, decay, tol
+                sessions.matcher, matcher, features, kpts, match_feeds, decay, tol
             )
     return bool(ok)
 
@@ -398,6 +410,7 @@ def main():
         models.matcher = FlexGlue(
             weights=args.weights,
             describe=False,
+            n_layers=options.n_layers,
             mp=None,
             early_stop_layers=options.early_stop_layers if options.early_stop else None,
         )

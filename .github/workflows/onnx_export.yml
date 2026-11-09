@@ -12,6 +12,8 @@ on:
       - "flexglue/**"
       - "onnx/**"
       - "tests/test_export.py"
+      - "tests/test_early_stop*.py"
+      - "tests/test_onnx*.py"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
   pull_request:
@@ -19,6 +21,8 @@ on:
       - "flexglue/**"
       - "onnx/**"
       - "tests/test_export.py"
+      - "tests/test_early_stop*.py"
+      - "tests/test_onnx*.py"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
 
@@ -57,6 +61,10 @@ jobs:
 
       - name: Check export isolation
         run: python -m unittest discover -s tests -p test_export.py -v
+      - name: Check early-stop and input contracts
+        run: |
+          python -m unittest discover -s tests -p 'test_early_stop*.py' -v
+          python -m unittest discover -s tests -p 'test_onnx*.py' -v
 
       - name: Cache the weights
         uses: actions/cache@v4
@@ -70,10 +78,10 @@ jobs:
       - name: Check the descriptor and float32 matcher
         run: |
           python onnx/check.py --cpu \
-            --descriptor "$RUNNER_TEMP/flexglue_onnx/flexglue_descriptor.onnx" \
-            --matcher "$RUNNER_TEMP/flexglue_onnx/flexglue_matcher.onnx"
+            --descriptor "$RUNNER_TEMP/flexglue_onnx"/flexglue_descriptor.onnx \
+            --matcher "$RUNNER_TEMP/flexglue_onnx"/flexglue_matcher.onnx
 
-      # Check the default native schedule as well as the released schedule below.
+      # Compare the default native schedule and the released schedule.
       - name: Export the float32 matcher with early stopping
         run: |
           python onnx/export.py --matcher_only \
@@ -82,7 +90,7 @@ jobs:
       - name: Check the float32 matcher with early stopping
         run: |
           python onnx/check.py --cpu \
-            --matcher "$RUNNER_TEMP/flexglue_onnx/flexglue_matcher_early_stop.onnx"
+            --matcher "$RUNNER_TEMP/flexglue_onnx"/flexglue_matcher_early_stop.onnx
 
       # The early-stopping configuration of the released models, which COLMAP
       # uses.
