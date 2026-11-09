@@ -99,5 +99,118 @@ class EntmaxReadoutTest(unittest.TestCase):
                     torch.testing.assert_close(got, reference, rtol=1e-5, atol=1e-6)
 
 
+def legacy_low_precision_mass(logits, hw, k=512):
+    # The original threshold accumulates and centers in the input dtype.
+    values, indices = logits.topk(k, dim=-1)
+    maximum, index = values[..., :1], indices[..., :1]
+    scores = (values - maximum) / 2
+    rho = torch.arange(1, k + 1, device=logits.device, dtype=logits.dtype)
+    mean = scores.cumsum(-1) / rho
+    mean_sq = scores.square().cumsum(-1) / rho
+    tau = mean - ((1 - rho * (mean_sq - mean.square())) / rho).clamp_min(0).sqrt()
+    tau = tau.gather(-1, (tau <= scores).sum(-1, keepdim=True) - 1)
+    h, w = hw
+    r = torch.arange(-1, 2, device=logits.device)
+    y = (index // w)[..., None] + r[:, None]
+    x = (index % w)[..., None] + r[None, :]
+    inside = ((y >= 0) & (y < h) & (x >= 0) & (x < w)).flatten(-2)
+    neighbor = (y.clamp(0, h - 1) * w + x.clamp(0, w - 1)).flatten(-2)
+    selected = ((logits - maximum) / 2).gather(-1, neighbor)
+    return ((selected - tau).clamp_min(0).square() * inside).sum(-1)
+
+
+def precision_fixture(device, dtype):
+    torch.manual_seed(93)
+    torch.randn(1, 3, 20)  # Preserve the previously observed CUDA fixture.
+    logits = torch.randn(1, 3, 1024) * 0.1 - 5
+    logits[0, 0, 0] = 5
+    logits[0, 1, -1] = logits[0, 1, -2] = 5
+    logits[0, 2, 512] = 5
+    return logits.to(device=device, dtype=dtype)
+
+
+class EntmaxPrecisionTest(unittest.TestCase):
+    def test_half_and_bfloat16_against_fp32_accumulation(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            for hw in ((4, 5), (32, 32)):
+                for grid_dtype in (dtype, torch.float32):
+                    with self.subTest(dtype=dtype, hw=hw, grid_dtype=grid_dtype):
+                        if hw == (32, 32):
+                            logits = precision_fixture("cpu", dtype)
+                        else:
+                            torch.manual_seed(15)
+                            logits = (torch.randn(1, 3, 20) * 0.1 - 5).to(dtype)
+                            logits[0, 0, 0] = 5
+                            logits[0, 1, -1] = logits[0, 1, -2] = 5
+                            logits[0, 2, 10] = 5
+                        grid = ops.cell_centers(*hw, hw[::-1], device="cpu").to(
+                            grid_dtype
+                        )
+                        actual = ops.entmax15_window_readout(logits, grid, hw)
+                        reference = ops.entmax15_window_readout(
+                            logits.float(), grid.float(), hw
+                        )
+                        self.assertEqual(
+                            actual[0].dtype, torch.promote_types(dtype, grid_dtype)
+                        )
+                        self.assertEqual(actual[1].dtype, dtype)
+                        for got, ref in zip(actual, reference):
+                            self.assertTrue(torch.isfinite(got).all())
+                            torch.testing.assert_close(
+                                got.float(), ref, rtol=0.01, atol=0.004
+                            )
+                        self.assertTrue(((actual[1] >= 0) & (actual[1] <= 1.01)).all())
+
+    def test_half_extreme_centering_stays_finite(self):
+        logits = torch.tensor([[[65504.0, -65504.0]]], dtype=torch.float16)
+        grid = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float16)
+        actual = ops.entmax15_window_readout(logits, grid, (1, 2))
+        reference = ops.entmax15_window_readout(logits.float(), grid.float(), (1, 2))
+        for got, expected in zip(actual, reference):
+            self.assertTrue(torch.isfinite(got).all())
+            torch.testing.assert_close(got.float(), expected)
+
+    def test_bfloat16_legacy_threshold_has_real_failure(self):
+        logits = precision_fixture("cpu", torch.bfloat16)
+        grid = ops.cell_centers(32, 32, (32, 32), device="cpu").bfloat16()
+        old = legacy_low_precision_mass(logits, (32, 32))
+        fixed = ops.entmax15_window_readout(logits, grid, (32, 32))[1]
+        self.assertGreater(old.max().item(), 1.05)
+        self.assertLessEqual(fixed.max().item(), 1.01)
+
+    def test_low_precision_gradients_against_fp32(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            for hw in ((4, 5), (32, 32)):
+                with self.subTest(dtype=dtype, hw=hw):
+                    torch.manual_seed(91)
+                    logits = torch.randn(1, 2, hw[0] * hw[1]).to(dtype).requires_grad_()
+                    grid = ops.cell_centers(*hw, hw[::-1], device="cpu")
+                    actual = ops.entmax15_window_readout(logits, grid, hw)
+                    grad = torch.autograd.grad(
+                        sum(x.float().sum() for x in actual), logits
+                    )[0]
+                    reference = logits.detach().float().requires_grad_()
+                    out = ops.entmax15_window_readout(reference, grid, hw)
+                    expected = torch.autograd.grad(
+                        sum(x.sum() for x in out), reference
+                    )[0]
+                    self.assertTrue(torch.isfinite(grad).all())
+                    torch.testing.assert_close(
+                        grad.float(), expected, rtol=0.03, atol=0.004
+                    )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_original_fp16_cuda_failure_is_fixed(self):
+        logits = precision_fixture("cuda", torch.float16)
+        grid = ops.cell_centers(32, 32, (32, 32), device="cuda").half()
+        old = legacy_low_precision_mass(logits, (32, 32))
+        actual = ops.entmax15_window_readout(logits, grid, (32, 32))[1]
+        reference = ops.entmax15_window_readout(logits.float(), grid.float(), (32, 32))[
+            1
+        ]
+        self.assertGreater(old.max().item(), 1.05)
+        torch.testing.assert_close(actual.float(), reference, rtol=0.001, atol=0.001)
+
+
 if __name__ == "__main__":
     unittest.main()

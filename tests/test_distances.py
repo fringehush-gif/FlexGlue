@@ -12,6 +12,9 @@ def reference(x, y):
 
 
 class SquaredDistanceTest(unittest.TestCase):
+    def test_zero_coordinate_width_preserves_empty_sum(self):
+        self.assertEqual(ops.sq_dist(torch.empty(1, 2, 0), torch.empty(1, 3, 0)), 0)
+
     def test_values_and_gradients(self):
         torch.manual_seed(3)
         for dtype in (torch.float32, torch.float64):
