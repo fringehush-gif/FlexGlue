@@ -11,7 +11,7 @@
   </p>
   <h2 align="center">
     <a href="https://arxiv.org/abs/2610.32976" align="center">Paper</a> | 
-    <a href="https://colab.research.google.com/github/cvg/FlexGlue/blob/main/demo.ipynb" align="center">Colab</a>
+    <a href="https://colab.research.google.com/github/fringehush-gif/FlexGlue/blob/main/demo.ipynb" align="center">Colab</a>
   </h2>
 
 </p>
@@ -48,10 +48,10 @@ On top, FlexGlue predicts whether the two images are covisible at all, which rej
 Install this repo using pip:
 
 ```bash
-git clone https://github.com/cvg/FlexGlue.git && cd FlexGlue
+git clone https://github.com/fringehush-gif/FlexGlue.git && cd FlexGlue
 python -m pip install -e .
 # or, without cloning:
-python -m pip install git+https://github.com/cvg/FlexGlue.git
+python -m pip install git+https://github.com/fringehush-gif/FlexGlue.git
 ```
 
 FlexGlue works with any keypoints. The examples below detect them with the extractors of [LightGlue](https://github.com/cvg/LightGlue):
@@ -182,7 +182,8 @@ matcher = FlexGlue(describe_resize=(640, 640)).eval().cuda()
 Inputs per image (`inputs0`, `inputs1`), as returned by `DINOv3Descriptor.describe`, merged with a LightGlue detector:
 - `features`: `(B, 256, h, w)` stride-8 feature map.
 - `image_size`: `(B, 2)` image size `(w, h)` in pixels.
-- `image`: `(B, 3, H, W)` the image, read by the refiner.
+- `image`: `(B, 3, H, W)` the image, read by the refiner when refinement features are not supplied.
+- `fine_features`: Optional refinement features from `matcher.refiner.extract(image, resize=matcher.conf.refine_resize)`. Reuse only for the same image, refiner weights, resize, strides, device and dtype; keep the packet unchanged while it is in use. Either image can supply them independently.
 - `keypoints`: `(B, M, 2)` keypoints in pixels, optional.
 - `descriptors`: `(B, M, 64)` descriptors of the keypoints, with `descriptor.describe(image, keypoints)`.
 
@@ -305,7 +306,7 @@ Batching has a few requirements:
 - ```coarse_stride```: Grid pitch of ```match_dense``` and the sampled mode, in pixels of the resized image (4 doubles the resolution). Default: 8.
 - ```max_num_samples```: Maximum number of sampled matches without keypoints. Default: 5000.
 - ```kde_balance```: Spread the sampled matches over the image as RoMa v2, instead of drawing by confidence. Default: True.
-- ```refine```: Refine with RoMa v2 refiners (needs ```image``` in the inputs). Default: False.
+- ```refine```: Refine with RoMa v2 refiners (needs ```image``` or matching ```fine_features``` in each input). Default: False.
 - ```refine_resize```: Input size of the refiners, as ```resize``` above. Default: (512, 512).
 - ```refine_scales```: Refiner strides, coarse to fine, fixed at construction. Default: (2, 1).
 
@@ -453,8 +454,8 @@ FlexGlue can also be loaded with `torch.hub`, without installing this repository
 ```python
 import torch
 
-matcher = torch.hub.load("cvg/FlexGlue", "flexglue", trust_repo=True).eval().cuda()
-matcher = torch.hub.load("cvg/FlexGlue", "flexglue", trust_repo=True, refine=True)  # with arguments
+matcher = torch.hub.load("fringehush-gif/FlexGlue", "flexglue", trust_repo=True).eval().cuda()
+matcher = torch.hub.load("fringehush-gif/FlexGlue", "flexglue", trust_repo=True, refine=True)  # with arguments
 ```
 
 ## ONNX export
