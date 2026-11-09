@@ -1,6 +1,6 @@
 """FlexGlue: Sparse-to-Dense Matching and Visual Disambiguation."""
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -19,6 +19,13 @@ from .utils.modules import (
 )
 
 WEIGHTS_URL = "https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue.pth"
+
+
+def _compile_method(method, **kwargs):
+    # Keep self explicit so deepcopy rebinds every compiled method's owner.
+    if isinstance(method, MethodType):
+        return torch.compile(method.__func__, **kwargs).__get__(method.__self__)
+    return torch.compile(method, **kwargs)
 
 
 class FlexGlue(nn.Module):
@@ -91,20 +98,20 @@ class FlexGlue(nn.Module):
     ) -> "FlexGlue":
         """Compile the encoder, transformer layers, heads and optional refiners."""
         if self.descriptor is not None:
-            self.descriptor.forward = torch.compile(
+            self.descriptor.forward = _compile_method(
                 self.descriptor.forward, mode="default", fullgraph=True
             )
         if self.refiner is not None:
-            self.refiner.features.forward = torch.compile(
+            self.refiner.features.forward = _compile_method(
                 self.refiner.features.forward, mode=mode, fullgraph=True
             )
-            self.refiner.forward = torch.compile(
+            self.refiner.forward = _compile_method(
                 self.refiner.forward, mode=mode, fullgraph=True
             )
         for block in self.transformers:  # dense tokens: fixed size, no masks
-            block.forward = torch.compile(block.forward, mode=mode, fullgraph=True)
+            block.forward = _compile_method(block.forward, mode=mode, fullgraph=True)
         for head in self.heads:  # queries padded to static_lengths, eager beyond
-            head.compiled_forward = torch.compile(
+            head.compiled_forward = _compile_method(
                 head.__call__, mode=mode, fullgraph=True
             )
         self.static_lengths = tuple(sorted(static_lengths))

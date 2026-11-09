@@ -32,7 +32,8 @@ class CompiledHeadTest(unittest.TestCase):
     def compile_mock(self, lengths):
         with patch("torch.compile", side_effect=lambda fn, **kwargs: fn) as compile_fn:
             self.model.compile(static_lengths=lengths)
-        self.assertEqual(compile_fn.call_args.args[0], self.head.__call__)
+        self.assertIs(compile_fn.call_args.args[0], self.head.__call__.__func__)
+        self.assertIs(self.head.compiled_forward.__self__, self.head)
 
     def test_bucket_selection_and_fallback(self):
         expected = self.run_head()
