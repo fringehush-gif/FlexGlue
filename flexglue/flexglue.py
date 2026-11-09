@@ -539,7 +539,17 @@ class FlexGlue(nn.Module):
             x = torch.cat([p2d0_i1 - c1, kpts0 - c0], -1)
             y = torch.cat([kpts1 - c1, p2d1_i0 - c0], -1)
             sq_dist = ops.sq_dist if conf.exact_nn else ops.sq_dist_gemm
-            m0, m1 = ops.mutual_nn(sq_dist(x, y))
+            dist = sq_dist(x, y)
+        else:
+            dist = 0.5 * (torch.cdist(p2d0_i1, kpts1) + torch.cdist(kpts0, p2d1_i0))
+        # Rejected nonfinite predictions must not steal finite mutual neighbors.
+        # Selection and threshold checks are discrete; no distance gradients escape.
+        dist = dist.detach()
+        dist.nan_to_num_(nan=torch.inf, posinf=torch.inf, neginf=torch.inf)
+        m0, m1 = ops.mutual_nn(dist)
+
+        if conf.gemm_nn:
+            del dist  # Selected-pair distances below do not need the full matrix.
 
             # exact mean distance of the selected pairs only
             def take(t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
@@ -554,8 +564,6 @@ class FlexGlue(nn.Module):
                 + (take(kpts0, m1) - p2d1_i0).norm(dim=-1)
             )
         else:
-            dist = 0.5 * (torch.cdist(p2d0_i1, kpts1) + torch.cdist(kpts0, p2d1_i0))
-            m0, m1 = ops.mutual_nn(dist)
             dist0, dist1 = dist.min(2).values, dist.min(1).values
         # geometric mean of both confidences, as the cycle score
         scores0 = (
