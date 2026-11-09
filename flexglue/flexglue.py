@@ -668,12 +668,8 @@ class FlexGlue(nn.Module):
             dense_p2di_rj = self.to_resized(pred[f"dense_p2d{i}_i{j}"], data[j], size_j)
             valid = is_covisible[:, None, None]
             valid = valid & (dense_confidence >= conf.filter_threshold)
-            valid &= ops.inside_border(dense_p2di_ii, size_i, border_i)
-            valid &= ops.inside_border(
-                self.to_descriptor(pred[f"dense_p2d{i}_i{j}"], data[j]),
-                size_j,
-                border_j,
-            )
+            valid &= ops.inside_border(dense_p2di_ri, size_i, border)
+            valid &= ops.inside_border(dense_p2di_rj, size_j, border)
             if ops.is_set(conf.max_distance_px):
                 dense_j = {
                     "dense_p2di_nj": pred[f"dense_p2d{j}_n{i}"],

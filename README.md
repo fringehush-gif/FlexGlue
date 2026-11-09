@@ -292,7 +292,7 @@ Batching has a few requirements:
 `FlexGlue`:
 - ```n_layers```: Number of transformer layers, fewer is faster but less accurate. Default: 9 (all).
 - ```filter_threshold```: Minimum match confidence. Default: 0.1.
-- ```max_distance_px```: Maximum cycle error, or mutual nearest-neighbor distance in sparse mode, in pixels of the descriptor input. Non-positive values or None disable it. Default: 3.0.
+- ```max_distance_px```: Maximum cycle error, or mutual nearest-neighbor distance in sparse mode, in pixels of the resized image (the descriptor input). Use `None` or a non-positive Python number to disable it. Default: 3.0.
 - ```min_covisibility```: Reject all matches of pairs with a lower ```covisibility_score```, e.g. 0.8 for noisy image sets. Default: 0.0 (off).
 - ```early_stop_decay```: Stop after layer ```k``` if ```covisibility_score < min_covisibility * (1 - early_stop_decay) ** (n_layers - k)```, lower stops earlier. Default: None (off).
 - ```early_stop_layers```: Intermediate layers to check, e.g. `(2, 4, 6, 8)` for the released ONNX schedule. Default `None` checks each intermediate layer; `()` checks none. Checks beyond a per-call `n_layers` are ignored; the exponent uses the full model depth.
