@@ -169,21 +169,33 @@ def lattice_kde(
     points: torch.Tensor, weights: torch.Tensor, std: float
 ) -> torch.Tensor:
     """Weighted gaussian kde (B, N) of points (B, N, D) in [-1, 1] at themselves."""
+    if not math.isfinite(std) or std <= 0 or not 0 < std * std < math.inf:
+        raise ValueError("std must be finite, positive and have a finite square.")
     b, n, d = points.shape
     pitch = std / 2  # splat to a lattice, blur it, read it back: cost independent of N
     size = math.ceil(2 / pitch) + 2
+    if size**d > torch.iinfo(torch.int64).max:
+        raise ValueError("std produces an unrepresentable lattice.")
+    # Validate kernel arithmetic before allocating the lattice or indexing it.
+    s = math.sqrt(std**2 - pitch**2 / 3)
+    r = math.ceil(3 * s / pitch)
+    precision = torch.finfo(torch.float32)
+    # Pitch conversion and multiplication each round once to float32.
+    max_root = math.sqrt(precision.max) / (1 + precision.eps / 2) ** 2
+    if r * pitch > max_root or 2 * s * s > precision.max:
+        raise ValueError("std exceeds the finite float32 kernel range.")
     u = ((points.float() + 1) / pitch).clamp(0, size - 1 - 1e-4)
     base, frac = u.floor().long(), u.frac()
-    corners = torch.cartesian_prod(*[torch.arange(2, device=points.device)] * d)
+    corners = torch.cartesian_prod(
+        *[torch.arange(2, device=points.device)] * d
+    ).reshape(-1, d)
     strides = size ** torch.arange(d - 1, -1, -1, device=points.device)
     idx = ((base[:, :, None] + corners) * strides).sum(-1).flatten(1)  # (B, N * 2^d)
     tent = torch.where(corners.bool(), frac[:, :, None], 1 - frac[:, :, None]).prod(-1)
     lattice = u.new_zeros(b, size**d)
     lattice.scatter_add_(1, idx, (tent * weights[..., None].float()).flatten(1))
     # splat and read tents add pitch^2 / 6 each
-    s = math.sqrt(std**2 - pitch**2 / 3)
-    r = math.ceil(3 * s / pitch)
-    k = torch.arange(-r, r + 1, device=points.device) * pitch
+    k = torch.arange(-r, r + 1, device=points.device, dtype=u.dtype) * pitch
     kernel = (std / s * torch.exp(-(k**2) / (2 * s**2))).view(1, 1, -1)
     lattice = lattice.view(b, *[size] * d)
     for dim in range(1, d + 1):
