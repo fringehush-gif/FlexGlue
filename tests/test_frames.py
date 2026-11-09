@@ -8,6 +8,61 @@ from flexglue import FlexGlue
 
 
 class DescriptorFrameTest(unittest.TestCase):
+    def test_to_resized_preserves_frame_precision_for_point_dtypes(self):
+        for width in (8192, 8193):
+            data = {
+                "features": torch.zeros(1, 1, 1, width),
+                "image_size": torch.tensor([[65536.0, 8.0]], dtype=torch.float32),
+            }
+            size = self.model.descriptor_size(data)
+            original_size = data["image_size"].clone()
+            original_frame = size.clone()
+            for dtype in (
+                torch.float16,
+                torch.bfloat16,
+                torch.float32,
+                torch.float64,
+                torch.int64,
+            ):
+                with self.subTest(width=width, dtype=dtype):
+                    points = torch.tensor([[[2, 4]]], dtype=dtype)
+                    if dtype.is_floating_point:
+                        points.requires_grad_()
+                    expected = points * (size / data["image_size"])[:, None, :]
+                    for supplied in (None, size):
+                        actual = self.model.to_resized(points, data, supplied)
+                        self.assertEqual(
+                            actual.dtype, torch.promote_types(dtype, torch.float32)
+                        )
+                        self.assertTrue(torch.isfinite(actual).all())
+                        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                        if dtype.is_floating_point:
+                            actual_grad = torch.autograd.grad(
+                                actual.sum(), points, retain_graph=True
+                            )[0]
+                            expected_grad = torch.autograd.grad(
+                                expected.sum(), points, retain_graph=True
+                            )[0]
+                            torch.testing.assert_close(
+                                actual_grad, expected_grad, atol=0, rtol=0
+                            )
+            self.assertTrue(torch.equal(data["image_size"], original_size))
+            self.assertTrue(torch.equal(size, original_frame))
+
+    def test_to_resized_retains_double_division_precision(self):
+        data = {
+            "features": torch.zeros(1, 1, 1, 8192),
+            "image_size": torch.tensor([[65535.0, 7.0]], dtype=torch.float32),
+        }
+        points = torch.tensor([[[2.0, 4.0]]], dtype=torch.float64)
+        frame = self.model.descriptor_size(data)
+        expected = points * (frame.double() / data["image_size"])[:, None, :]
+        actual = self.model.to_resized(points, data)
+        self.assertEqual(actual.dtype, torch.float64)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        rounded = points * (frame / data["image_size"])[:, None, :]
+        self.assertFalse(torch.equal(actual, rounded))
+
     def test_geometry_precision_is_independent_of_feature_precision(self):
         points = torch.tensor([[[319.25, 271.125]]], dtype=torch.float64)
         size = torch.tensor([[1536, 1024]])

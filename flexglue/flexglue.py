@@ -454,7 +454,8 @@ class FlexGlue(nn.Module):
         """Points (B, ..., 2) from pixels of image i to descriptor input pixels."""
         if size is None:
             size = self.descriptor_size(data_i)
-        scale = size.to(points) / data_i["image_size"]
+        dtype = torch.promote_types(points.dtype, torch.float32)
+        scale = size.to(device=points.device, dtype=dtype) / data_i["image_size"]
         return points * scale.view(scale.shape[0], *[1] * (points.dim() - 2), 2)
 
     def gate_points(
