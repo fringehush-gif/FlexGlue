@@ -312,7 +312,8 @@ with torch.inference_mode():
     }
 ```
 Use the same refinement resize as the matching call. Reuse a map only with the
-same image, weights, resize, device and dtype. Put it in that image's
+same image, weights, resize, device and dtype. In-place changes to the image,
+weights or cached tensors require the caller to invalidate the cache. Put it in that image's
 `fine_features` input. Retained compiled refinement
 outputs likewise need owned copies before a later graph generation.
 

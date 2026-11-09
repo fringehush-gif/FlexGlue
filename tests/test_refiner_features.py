@@ -1,4 +1,5 @@
 import copy
+import importlib.util
 import unittest
 from collections import namedtuple
 from types import SimpleNamespace
@@ -186,8 +187,6 @@ class SelectedFeaturesTest(unittest.TestCase):
             pair_context=lambda *args: context(None),
         )
         f = torch.zeros(1, 1, 2, 2)
-        cached = {1: torch.ones(1)}
-        a, b = {"features": f, "image": "a"}, {"features": f, "fine_features": cached}
         fake.default_conf = FlexGlue.default_conf
         fake.fixed_conf = FlexGlue.fixed_conf
         fake.conf = SimpleNamespace(**FlexGlue.default_conf)
@@ -200,15 +199,108 @@ class SelectedFeaturesTest(unittest.TestCase):
         fake.descriptor = None
         conf = FlexGlue.resolve_conf(fake, {})
         self.assertFalse(conf.refine_selected_features)
-        result = FlexGlue.decode_pair(fake, a, b, conf)
-        self.assertEqual(ref.calls, [("custom", "a", (8, 8))])
-        self.assertIs(result.fine[1], cached)
-        conf = FlexGlue.resolve_conf(fake, {"refine_selected_features": True})
-        self.assertTrue(conf.refine_selected_features)
-        self.assertFalse(fake.conf.refine_selected_features)
-        result = FlexGlue.decode_pair(fake, a, b, conf)
-        self.assertEqual(ref.calls[-1], ("selected", "a", (8, 8)))
-        self.assertIs(result.fine[1], cached)
+        cached = ({1: torch.ones(1)}, {1: torch.zeros(1)})
+        for selected in (False, True):
+            conf = FlexGlue.resolve_conf(fake, {"refine_selected_features": selected})
+            self.assertEqual(conf.refine_selected_features, selected)
+            self.assertFalse(fake.conf.refine_selected_features)
+            kind = "selected" if selected else "custom"
+            for use_cache in (
+                (False, False),
+                (True, False),
+                (False, True),
+                (True, True),
+            ):
+                with self.subTest(selected=selected, use_cache=use_cache):
+                    ref.calls.clear()
+                    inputs, expected_calls = [], []
+                    for i, image in enumerate(("a", "b")):
+                        data = {"features": f}
+                        if use_cache[i]:
+                            data["fine_features"] = cached[i]
+                        else:
+                            data["image"] = image
+                            expected_calls.append((kind, image, (8, 8)))
+                        inputs.append(data)
+                    result = FlexGlue.decode_pair(fake, *inputs, conf)
+                    self.assertEqual(ref.calls, expected_calls)
+                    for i in range(2):
+                        if use_cache[i]:
+                            self.assertIs(result.fine[i], cached[i])
+                        else:
+                            self.assertEqual(result.fine[i], {kind: ("a", "b")[i]})
+
+    @unittest.skipUnless(
+        torch.cuda.is_available()
+        and callable(
+            getattr(getattr(torch, "compiler", None), "cudagraph_mark_step_begin", None)
+        )
+        and importlib.util.find_spec("triton") is not None,
+        "CUDA compilation support is required",
+    )
+    def test_owned_compiled_features_survive_pair_generations(self):
+        ref = RoMav2Refiner.__new__(RoMav2Refiner)
+        nn.Module.__init__(ref)
+        ref.features = tiny().eval().cuda()
+        ref.scales = (2, 1)
+        ref.features.forward = torch.compile(
+            ref.features.forward, mode="reduce-overhead", fullgraph=True
+        )
+        context = namedtuple("Context", "fine")
+        fake = SimpleNamespace(
+            static_lengths=(4096,),
+            transformers=[],
+            refiner=ref,
+            encode_pair=lambda a, b: (a, b, None, None),
+            pair_context=lambda *args: context(None),
+        )
+        conf = SimpleNamespace(
+            n_layers=0,
+            mp=None,
+            refine=True,
+            refine_resize=(32, 32),
+            refine_selected_features=False,
+        )
+        images = [torch.rand(1, 3, 32, 32, device="cuda") for _ in range(2)]
+        feature = torch.zeros(1, 1, 4, 4)
+        with torch.inference_mode():
+            for selected in (False, True):
+                conf.refine_selected_features = selected
+                extract = ref.extract_selected if selected else ref.extract
+                for _ in range(3):
+                    torch.compiler.cudagraph_mark_step_begin()
+                    extract(images[0], resize=(32, 32))
+                caches = []
+                for image in images:
+                    raw = extract(image, resize=(32, 32))
+                    owned = {s: value.clone() for s, value in raw.items()}
+                    for s in owned:
+                        self.assertNotEqual(owned[s].data_ptr(), raw[s].data_ptr())
+                    caches.append(owned)
+                saved = [
+                    {s: value.clone() for s, value in cache.items()} for cache in caches
+                ]
+                inputs = [
+                    {"features": feature, "fine_features": cache} for cache in caches
+                ]
+                for _ in range(2):
+                    with patch.object(
+                        ref, "extract", side_effect=AssertionError("cache missed")
+                    ), patch.object(
+                        ref,
+                        "extract_selected",
+                        side_effect=AssertionError("cache missed"),
+                    ):
+                        pair = FlexGlue.decode_pair(fake, *inputs, conf)
+                    # Reuse buffers after decode_pair starts another generation.
+                    extract(images[0], resize=(32, 32))
+                    for i, (cache, expected) in enumerate(zip(caches, saved)):
+                        self.assertIs(pair.fine[i], cache)
+                        for s, value in cache.items():
+                            torch.testing.assert_close(
+                                value, expected[s], rtol=0, atol=0
+                            )
+                            self.assertTrue(torch.isfinite(value).all())
 
 
 if __name__ == "__main__":
