@@ -19,9 +19,10 @@ class EarlyStopExportTest(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "onnx" / "export.py"
         sys.path.insert(0, str(path.parent))
         cls.addClassCleanup(sys.path.remove, str(path.parent))
-        spec = importlib.util.spec_from_file_location("flexglue_export_test", path)
-        cls.export = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.export)
+        with patch.object(sys, "path", [str(path.parent), *sys.path]):
+            cls.export = importlib.import_module("export")
+        if Path(cls.export.__file__).resolve() != path:
+            raise ImportError("export module came from another checkout")
 
     def test_early_stop_export_checks_only_required_heads_before_copy(self):
         from flexglue import FlexGlue
@@ -280,7 +281,10 @@ class EarlyStopExportTest(unittest.TestCase):
         )
         check = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, {"export": self.export}):
-            spec.loader.exec_module(check)
+            with patch.object(
+                sys, "path", [str(Path(check.__file__).parent), *sys.path]
+            ):
+                spec.loader.exec_module(check)
         graph = helper.make_graph(
             [helper.make_node("Identity", ["features0"], ["output"])],
             "metadata_fixture",
@@ -339,7 +343,10 @@ class EarlyStopExportTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("flexglue_check_test", path)
         check = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, {"export": self.export}):
-            spec.loader.exec_module(check)
+            with patch.object(
+                sys, "path", [str(Path(check.__file__).parent), *sys.path]
+            ):
+                spec.loader.exec_module(check)
 
         class Matcher:
             def match(self, data0, data1, **kwargs):
@@ -449,7 +456,10 @@ class EarlyStopExportTest(unittest.TestCase):
             )
             check = importlib.util.module_from_spec(spec)
             with patch.dict(sys.modules, {"export": export}):
-                spec.loader.exec_module(check)
+                with patch.object(
+                    sys, "path", [str(Path(check.__file__).parent), *sys.path]
+                ):
+                    spec.loader.exec_module(check)
             graph_model = onnx.load(str(path))
             self.assertEqual(check.matcher_options(path).n_layers, n_layers)
             self.assertTrue(

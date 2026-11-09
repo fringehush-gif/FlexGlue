@@ -49,7 +49,6 @@ class FlexGlue(nn.Module):
         "describe": True,  # build a DINOv3Descriptor for inputs without features
         "describe_mp": None,  # optional resident fp16 descriptor network
         "mmap_weights": False,  # opt in to immutable local CPU checkpoint backing
-        "rgb8_backend": None,  # optional "torch", "torch-compile" or "triton"
         "rgb8_host_sampling": False,  # opt in to CPU lattice selection
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
         "rgb8_backend": None,  # optional "torch", "torch-compile" or "triton"
@@ -202,7 +201,7 @@ class FlexGlue(nn.Module):
             block.forward = _compile_method(block.forward, mode=mode, fullgraph=True)
         for head in self.heads:  # queries padded to static_lengths, eager beyond
             head.compiled_forward = _compile_method(
-                head.forward, mode=mode, fullgraph=True
+                head.__call__, mode=mode, fullgraph=True
             )
         self.static_lengths = tuple(sorted(static_lengths))
         return self
@@ -638,12 +637,8 @@ class FlexGlue(nn.Module):
             kpts_ri = self.to_resized(data[i]["keypoints"], data[i], size_i)
             p2di_rj = self.to_resized(pred[f"p2d{i}_i{j}"], data[j], size_j)
             valid = is_covisible[:, None]
-            valid = valid & ops.inside_border(
-                self.to_descriptor(data[i]["keypoints"], data[i]), size_i, border_i
-            )
-            valid &= ops.inside_border(
-                self.to_descriptor(pred[f"p2d{i}_i{j}"], data[j]), size_j, border_j
-            )
+            valid = valid & ops.inside_border(kpts_ri, size_i, border)
+            valid &= ops.inside_border(p2di_rj, size_j, border)
             if f"cycle_error{i}" in pred:
                 valid &= pred[f"cycle_error{i}"] < conf.max_distance_px
             pred[f"valid{i}"] = valid

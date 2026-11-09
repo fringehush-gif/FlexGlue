@@ -76,7 +76,9 @@ class DisabledDistanceTest(unittest.TestCase):
 
     def test_cycle_gate_retains_or_filters_known_cells(self):
         size = torch.tensor([[24.0, 16.0]])
-        data = [{"image_size": size, "resized_size": size} for _ in range(2)]
+        data = [
+            {"image_size": size, "features": torch.zeros(1, 4, 2, 3)} for _ in range(2)
+        ]
         grid = ops.grid_sources(torch.zeros(1, 1, 3, 2))
         context = SimpleNamespace(covisibility_score=torch.ones(1))
         for distance in (None, 0, -1, -10.0, 3.0):

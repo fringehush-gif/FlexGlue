@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+
 from flexglue import FlexGlue
 from flexglue.refiner import ConvRefiner, RoMav2Refiner, local_correlation
 from flexglue.utils import ops

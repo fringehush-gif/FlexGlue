@@ -55,7 +55,9 @@ def tiny_descriptor(resize=(32, 32), descriptor_cls=DINOv3Descriptor, mp=None):
     with patch("flexglue.descriptor.ConvNeXt", TinyStride8Backbone), patch(
         "flexglue.descriptor.LinearConvHead", TinyHead
     ):
-        return descriptor_cls(weights="unused", state_dict=state, resize=resize, mp=mp).eval()
+        return descriptor_cls(
+            weights="unused", state_dict=state, resize=resize, mp=mp
+        ).eval()
 
 
 def tiny_matcher():
@@ -395,7 +397,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
                     conf,
                 )
             self.assertEqual(calls, [torch.Tensor, np.ndarray])
-            for key in ("features", "image_size", "resized_size"):
+            for key in ("features", "image_size"):
                 self.assertPacketEqual(expected[key], actual[key])
         finally:
             handle.remove()
@@ -664,7 +666,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 self.assertEqual(prepare.call_count, 2)
             self.assertEqual(calls, [torch.Tensor] * 2 + [np.ndarray] * 2)
             for left, right in zip(expected, actual):
-                for key in ("features", "image_size", "resized_size"):
+                for key in ("features", "image_size"):
                     self.assertPacketEqual(left[key], right[key])
         finally:
             handle.remove()

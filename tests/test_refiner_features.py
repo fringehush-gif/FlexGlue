@@ -195,6 +195,8 @@ class SelectedFeaturesTest(unittest.TestCase):
         fake.conf.describe = False
         fake.conf.mp = None
         fake.conf.refine_resize = (8, 8)
+        fake.require_heads = lambda layers: FlexGlue.require_heads(fake, layers)
+        fake.stopping_layers = lambda conf: FlexGlue.stopping_layers(fake, conf)
         fake.loaded_heads = {0}
         fake.descriptor = None
         conf = FlexGlue.resolve_conf(fake, {})
