@@ -1,7 +1,7 @@
 """FlexGlue: Sparse-to-Dense Matching and Visual Disambiguation."""
 
 from functools import partial
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -21,6 +21,13 @@ from .utils.modules import (
 )
 
 WEIGHTS_URL = "https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue.pth"
+
+
+def _compile_method(method, **kwargs):
+    # Keep self explicit so deepcopy rebinds every compiled method's owner.
+    if isinstance(method, MethodType):
+        return torch.compile(method.__func__, **kwargs).__get__(method.__self__)
+    return torch.compile(method, **kwargs)
 
 
 class FlexGlue(nn.Module):
@@ -169,12 +176,23 @@ class FlexGlue(nn.Module):
         mode: str = "reduce-overhead",
         static_lengths: Tuple[int, ...] = (512, 1024, 2048, 4096),
     ) -> "FlexGlue":
-        """Compile transformer layers and heads; empty lengths keep heads eager."""
+        """Compile the encoder, transformer layers, heads and optional refiners."""
+        if self.descriptor is not None:
+            self.descriptor.forward = _compile_method(
+                self.descriptor.forward, mode="default", fullgraph=True
+            )
+        if self.refiner is not None:
+            self.refiner.features.forward = _compile_method(
+                self.refiner.features.forward, mode=mode, fullgraph=True
+            )
+            self.refiner.forward = _compile_method(
+                self.refiner.forward, mode=mode, fullgraph=True
+            )
         for block in self.transformers:  # dense tokens: fixed size, no masks
-            block.forward = torch.compile(block.forward, mode=mode, fullgraph=True)
+            block.forward = _compile_method(block.forward, mode=mode, fullgraph=True)
         for head in self.heads:  # queries padded to static_lengths, eager beyond
-            head.compiled_forward = torch.compile(
-                head.forward, mode=mode, fullgraph=True
+            head.compiled_forward = _compile_method(
+                head.__call__, mode=mode, fullgraph=True
             )
         self.static_lengths = tuple(sorted(static_lengths))
         return self
@@ -446,11 +464,32 @@ class FlexGlue(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """heads[layer] on points (B, N, 2), padded to a static length if compiled."""
         n = points_ni.shape[1]
-        if not self.static_lengths or n > self.static_lengths[-1]:
-            return self.heads[layer](points_ni, cf_i, cf_j)
+        head = self.heads[layer]
+        if n == 0 or not self.static_lengths or n > self.static_lengths[-1]:
+            return head(points_ni, cf_i, cf_j)
+        # Hooks must observe the original query count, not padding. This also
+        # keeps hooks added after compile on the normal module call boundary.
+        module = nn.modules.module
+        global_hooks = any(
+            getattr(module, name, {})
+            for name in (
+                "_global_forward_hooks",
+                "_global_forward_pre_hooks",
+                "_global_backward_hooks",
+                "_global_backward_pre_hooks",
+            )
+        )
+        if global_hooks or any(
+            m._forward_hooks
+            or m._forward_pre_hooks
+            or m._backward_hooks
+            or m._backward_pre_hooks
+            for m in head.modules()
+        ):
+            return head(points_ni, cf_i, cf_j)
         length = next(s for s in self.static_lengths if s >= n)
         points_ni = F.pad(points_ni, (0, 0, 0, length - n))  # rows are independent
-        p2di_nj, confidence = self.heads[layer].compiled_forward(points_ni, cf_i, cf_j)
+        p2di_nj, confidence = head.compiled_forward(points_ni, cf_i, cf_j)
         # clone: CUDA graph outputs are overwritten by the next replay
         return p2di_nj[:, :n].clone(), confidence[:, :n].clone()
 
