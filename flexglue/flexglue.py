@@ -746,6 +746,12 @@ class FlexGlue(nn.Module):
         for k, v in state_dict.items():
             if not torch.overrides.is_tensor_like(v):
                 raise TypeError(f"Expected tensor-like weight for {k}.")
+            if isinstance(v, torch.Tensor) and (
+                v.is_meta or v.is_quantized or v.layout != torch.strided
+            ):
+                raise TypeError(
+                    f"Weight {k} must be a materialized, non-quantized strided tensor."
+                )
             # PyTorch accepts a one-dimensional legacy value for a scalar.
             legacy_scalar = expected[k].ndim == 0 and v.ndim == 1 and v.numel() > 0
             if not legacy_scalar and v.shape != expected[k].shape:

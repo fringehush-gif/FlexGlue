@@ -497,6 +497,14 @@ class WeightLoadingTest(unittest.TestCase):
         wrong_type = dict(valid)
         wrong_type["matcher.input_proj.weight"] = "invalid"
         invalid.append(wrong_type)
+        late_key = "matcher.heads.2.covisibility.weight"
+        late_value = valid[late_key]
+        for unsupported in (
+            torch.empty_like(late_value, device="meta"),
+            late_value.to_sparse(),
+            torch.quantize_per_tensor(late_value, 0.1, 0, torch.qint8),
+        ):
+            invalid.append({**valid, late_key: unsupported})
         for state in invalid:
             # If preflight were absent, this changed tensor could be copied first.
             state["matcher.input_proj.bias"] = torch.ones_like(
