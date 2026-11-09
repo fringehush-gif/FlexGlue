@@ -106,6 +106,23 @@ class ImageConversionTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     resize_tensor(torch.ones(1, 3, 4, 6), target)
 
+    def test_scalar_resize_keeps_extreme_aspect_dimensions_positive(self):
+        for shape in ((1, 4096), (4096, 1), (1, 4096, 3), (4096, 1, 3)):
+            image = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+            before = image.copy()
+            for target in (1, 512):
+                with self.subTest(shape=shape, target=target):
+                    actual, scale = resize_image(image, target)
+                    height = 1 if shape[0] == 1 else target
+                    width = 1 if shape[1] == 1 else target
+                    expected = cv2.resize(
+                        image, (width, height), interpolation=cv2.INTER_AREA
+                    )
+                    np.testing.assert_array_equal(actual, expected)
+                    self.assertEqual(actual.shape[:2], (height, width))
+                    self.assertEqual(scale, (width / shape[1], height / shape[0]))
+                    np.testing.assert_array_equal(image, before)
+
     def test_valid_resize_pixels_and_geometry(self):
         image = np.arange(4 * 6 * 3, dtype=np.uint8).reshape(4, 6, 3)
         for size, target in ((3, (2, 3)), ((3, 5), (3, 5)), ([3, 5], (3, 5))):
