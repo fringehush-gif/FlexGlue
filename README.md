@@ -278,6 +278,7 @@ Batching has a few requirements:
 - ```remove_border_px```: Drop matches this close to the border, in pixels of the resized image (as ```max_distance_px```). Default: 0.0.
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
 - ```rgb8_backend```: Optional RGB8 preparation backend: `"torch"`, `"torch-compile"`, or `"triton"`; default `None`.
+- ```rgb8_host_sampling```: Select resize samples on the host before upload with an RGB8 backend. Default: False.
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True.
 - ```exact_nn```: With ```gemm_nn```, compute the squared distances from coordinate differences instead of one matrix multiplication: slower but exact, also where float32 matrix multiplications run in TF32. Default: False.
@@ -322,6 +323,18 @@ also accepts a backend selection. The caller must not mutate input bytes during
 the blocking upload. Byte input uses the normalization buffers' dtype before
 resizing. Tensor and RGB8 inputs share encoder compilation; custom preprocessing
 receives the original-resolution tensor through the regular path. Triton is optional for the Triton preparation backend.
+
+`rgb8_host_sampling=True` is an optional choice alongside `rgb8_backend`. It
+packs the exact samples needed for eligible integer downscales before uploading;
+other sizes keep the original pixels. `DINOv3Descriptor.describe_rgb8` and the
+low-level `prepare_rgb8` functions accept `host_sampling=True` directly. The
+default is off. Packing can cost more than the saved transfer: a small local
+screen of an earlier automatic-selection prototype using the same helper on one
+real 3072 input measured 2.45 → 3.38 ms on an RTX 3080 Ti and 13.52 → 5.61 ms
+on an RTX 3060 (Torch RGB, two processes per arm, five calls per process). The
+explicit option itself was not timed. A separate generated 6144x4096 input also benefited; it was not
+a real photograph. These are preparation-only observations, not whole-model
+or reconstruction results.
 
 
 ## torch.hub

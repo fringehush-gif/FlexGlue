@@ -146,6 +146,7 @@ class DINOv3Descriptor(nn.Module):
                 data.get("keypoints"),
                 resize,
                 backend=data["rgb8_backend"],
+                host_sampling=data.get("rgb8_host_sampling", False),
             )
         return self._forward(data, resize)
 
@@ -193,9 +194,14 @@ class DINOv3Descriptor(nn.Module):
         resize: Optional[pp.Resize] = None,
         *,
         backend: str = "triton",
+        host_sampling: bool = False,
     ) -> dict:
         """Describe HWC byte input through the same public forward dispatch."""
-        data = {"image": image, "rgb8_backend": backend}
+        data = {
+            "image": image,
+            "rgb8_backend": backend,
+            "rgb8_host_sampling": host_sampling,
+        }
         if keypoints is not None:
             data["keypoints"] = keypoints
         return self.forward(data, resize)
@@ -207,6 +213,7 @@ class DINOv3Descriptor(nn.Module):
         resize: Optional[pp.Resize] = None,
         *,
         backend: str = "triton",
+        host_sampling: bool = False,
     ) -> dict:
         """Describe HWC RGB8 with an optional CUDA preparation backend.
 
@@ -214,6 +221,8 @@ class DINOv3Descriptor(nn.Module):
         inputs and inference settings use the original Torch preprocessing.
         Byte input uses the normalization buffers' dtype before resizing.
         """
+        if not isinstance(host_sampling, bool):
+            raise ValueError("host_sampling must be a bool")
         if backend not in ("torch", "torch-compile", "triton"):
             raise ValueError("backend must be 'torch', 'torch-compile' or 'triton'.")
         if (
@@ -269,6 +278,7 @@ class DINOv3Descriptor(nn.Module):
                 target_hw=(512, 512),
                 device=device,
                 codebook_device=table,
+                host_sampling=host_sampling,
                 **options,
             )
             return port.describe_prepared(self, prepared, keypoints=keypoints)

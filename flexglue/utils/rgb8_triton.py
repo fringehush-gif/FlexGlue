@@ -118,11 +118,13 @@ def prepare_rgb8(
     target_hw: tuple[int, int] = (512, 512),
     device: Union[torch.device, str] = "cuda",
     codebook_device: Optional[torch.Tensor] = None,
+    host_sampling: bool = False,
 ) -> PreparedDescriptorInput:
     return _prepare_rgb8(
         rgb,
         target_hw=target_hw,
         device=device,
         codebook_device=codebook_device,
+        host_sampling=host_sampling,
         resize=_resize_rgb8,
     )

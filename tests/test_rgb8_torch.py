@@ -13,7 +13,11 @@ from torch.nn import functional as F
 
 from flexglue import FlexGlue
 from flexglue.utils import rgb8_torch
-from flexglue.utils._rgb8 import fp32_codebook, select_upload_pixels
+from flexglue.utils._rgb8 import (
+    fp32_codebook,
+    select_resize_samples,
+    select_upload_pixels,
+)
 from flexglue.utils.preprocess import numpy_image_to_torch
 
 
@@ -58,6 +62,33 @@ def exceptional_neighbours(test, device, compiled):
 
 
 class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
+    def test_host_selection_shares_the_tensor_lattice(self):
+        for sy, sx in ((1, 1), (2, 3), (3, 5), (4, 6), (5, 8), (31, 32)):
+            for th, tw in ((1, 1), (5, 7)):
+                shape = (th * sy, tw * sx, 3)
+                image = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+                selected = select_resize_samples(image, (th, tw))
+                tensor = select_resize_samples(torch.from_numpy(image), (th, tw))
+                np.testing.assert_array_equal(selected, tensor.numpy())
+                for table in tables("cpu"):
+                    expected = reference(
+                        torch.from_numpy(image), table, (th, tw), False
+                    )
+                    actual = reference(
+                        torch.from_numpy(selected.copy()), table, (th, tw), False
+                    )
+                    self.assertPacketEqual(expected, actual)
+        for shape, target in (
+            ((9, 13, 3), (5, 7)),
+            ((1, 1, 3), (5, 7)),
+            ((5, 7, 3), (5, 7)),
+            ((10, 21, 3), (5, 7)),
+        ):
+            image = np.zeros(shape, dtype=np.uint8)
+            tensor = torch.from_numpy(image)
+            self.assertIs(select_resize_samples(image, target), image)
+            self.assertIs(select_resize_samples(tensor, target), tensor)
+
     def test_large_integer_factors_and_exceptional_neighbours(self):
         for source_hw, target_hw in (
             ((155, 224), (5, 7)),

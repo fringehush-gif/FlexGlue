@@ -38,6 +38,7 @@ class FlexGlue(nn.Module):
         "mp": "float16",  # transformer dtype: float16, bfloat16 or None (fp32)
         "describe": True,  # build a DINOv3Descriptor for inputs without features
         "rgb8_backend": None,  # optional "torch", "torch-compile" or "triton"
+        "rgb8_host_sampling": False,  # opt in to CPU lattice selection
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
         "refine": False,  # refine with RoMa v2's dense refiners
         "refine_resize": (512, 512),  # refiner input, int: long side, (h, w): squash
@@ -68,6 +69,8 @@ class FlexGlue(nn.Module):
             raise ValueError(
                 "rgb8_backend must be None, 'torch', 'torch-compile' or 'triton'."
             )
+        if not isinstance(conf.rgb8_host_sampling, bool):
+            raise ValueError("rgb8_host_sampling must be a bool.")
         d, h = conf.descriptor_dim, conf.num_heads
         self.input_proj = nn.Linear(conf.input_dim, d)
         self.posenc = LearnableFourierPositionalEncoding(2, d // h)
@@ -277,7 +280,11 @@ class FlexGlue(nn.Module):
                         )
                     else:
                         described = self.descriptor(
-                            {"image": image, "rgb8_backend": conf.rgb8_backend},
+                            {
+                                "image": image,
+                                "rgb8_backend": conf.rgb8_backend,
+                                "rgb8_host_sampling": conf.rgb8_host_sampling,
+                            },
                             resize=conf.describe_resize,
                         )
                 else:
@@ -697,6 +704,8 @@ class FlexGlue(nn.Module):
             raise ValueError(
                 "rgb8_backend must be None, 'torch', 'torch-compile' or 'triton'."
             )
+        if not isinstance(c.rgb8_host_sampling, bool):
+            raise ValueError("rgb8_host_sampling must be a bool.")
         if not 0 <= c.n_layers <= self.conf.n_layers:
             raise ValueError(f"n_layers must be in [0, {self.conf.n_layers}].")
         if c.n_layers not in self.loaded_heads:
