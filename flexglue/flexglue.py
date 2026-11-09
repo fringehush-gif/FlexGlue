@@ -54,6 +54,7 @@ class FlexGlue(nn.Module):
         "rgb8_backend": None,  # optional "torch", "torch-compile" or "triton"
         "rgb8_triton": False,  # opt-in direct RGB8 descriptor grid on supported CUDA
         "refine": False,  # refine with RoMa v2's dense refiners
+        "refine_selected_features": False,  # opt in to skipping unused eval stages
         "refine_resize": (512, 512),  # refiner input, int: long side, (h, w): squash
         "readout_backend": "torch",  # optional eager threshold fusion: "triton"
         "refine_correlation": "torch",  # optional eager CUDA correlation: "triton"
@@ -467,9 +468,12 @@ class FlexGlue(nn.Module):
             for data in (data0, data1):
                 features = data.get("fine_features")
                 if features is None:
-                    features = self.refiner.extract(
-                        data["image"], resize=conf.refine_resize
+                    extract = (
+                        self.refiner.extract_selected
+                        if conf.refine_selected_features
+                        else self.refiner.extract
                     )
+                    features = extract(data["image"], resize=conf.refine_resize)
                 fine.append(features)
             context = context._replace(fine=tuple(fine))
         return context
