@@ -453,6 +453,27 @@ The transformer layers and the correspondence heads are compiled into CUDA graph
 
 Descriptor encoding is currently eager. Future descriptor compilation should reach encoding for both tensor and accelerated RGB8 inputs; the latter bypasses `forward` and calls `encode` directly. Preserve cached features across later images and keep copied descriptors independent. Before changing descriptor compilation, run the RGB8 tests with `FLEXGLUE_TEST_RGB8_CUDA=1` for accelerated routing and lifetime checks. Ordinary CPU CI covers copied-model weights.
 
+
+### Ordered image prefetch
+
+Use `read_images(paths, prefetch=True)` as a context manager to overlap OpenCV
+decoding with consumer work. It yields `(path, image)` pairs in input order;
+conversion, GPU upload and model work remain on the consumer thread.
+
+```python
+from flexglue.utils import read_images
+
+with read_images(paths, prefetch=True) as images:
+    for path, image in images:
+        # Process the image here; release it before advancing when possible.
+        pass
+```
+
+Prefetch is opt-in and uses two CPU workers with at most two pending reads.
+Keeping the previous image while advancing can transiently retain four decoded
+images. Consumed images are released when the caller drops them; closing the
+context joins workers, including after an error or early exit.
+
 ## torch.hub
 
 FlexGlue can also be loaded with `torch.hub`, without installing this repository. Arguments are passed to `FlexGlue`:

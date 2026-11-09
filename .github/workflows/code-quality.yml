@@ -6,6 +6,8 @@ on:
     paths:
       - '**.py'
       - '.github/workflows/code-quality.yml'
+      - 'requirements.txt'
+      - 'pyproject.toml'
   pull_request:
     types: [ assigned, opened, synchronize, reopened ]
 jobs:
