@@ -190,7 +190,9 @@ def lattice_kde(
         *[torch.arange(2, device=points.device)] * d
     ).reshape(-1, d)
     strides = size ** torch.arange(d - 1, -1, -1, device=points.device)
-    idx = ((base[:, :, None] + corners) * strides).sum(-1).flatten(1)  # (B, N * 2^d)
+    point_idx = (base * strides).sum(-1)
+    corner_idx = (corners * strides).sum(-1)
+    idx = (point_idx[..., None] + corner_idx).flatten(1)  # (B, N * 2^d)
     tent = torch.where(corners.bool(), frac[:, :, None], 1 - frac[:, :, None]).prod(-1)
     lattice = u.new_zeros(b, size**d)
     lattice.scatter_add_(1, idx, (tent * weights[..., None].float()).flatten(1))
