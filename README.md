@@ -262,8 +262,11 @@ for b in range(len(images0)):
 ```
 
 `read_images` preserves `read_image` pixels and input order. Its default is
-serial; `prefetch=True` uses two CPU workers with at most two prefetched images
-plus the current image. Always use the context manager so early exit cancels
+serial; `prefetch=True` uses two CPU workers with at most two pending reads.
+A caller retaining its previous image while advancing can transiently hold four
+decoded images. Release it before advancing to avoid that extra handoff image.
+The iterator does not retain yielded pixels after the caller releases them.
+Always use the context manager so early exit cancels
 queued reads and joins running workers. Exceptions appear at their input ordinal;
 up to two successor files may already have been opened. Images are decoded
 freshly, without a persistent cache. The model and single-image APIs are unchanged.

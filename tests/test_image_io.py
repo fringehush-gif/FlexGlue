@@ -1,5 +1,6 @@
 """CPU scheduling/reader tests without model, checkpoint or Triton imports."""
 import ast
+import gc
 import importlib.util
 import json
 import sys
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import types
 import unittest
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -60,6 +62,31 @@ class Scheduling(unittest.TestCase):
             self.assertEqual(list(rows), [(i, i * 7) for i in range(7)])
         self.assertEqual(stats["maxPending"], 2)
         self.assertTrue(stats["workersJoined"])
+
+    def test_consumed_payload_is_not_retained_until_next_read(self):
+        class Payload:
+            def __init__(self):
+                self.pixels = bytearray(16 * 1024 * 1024)
+
+        for enabled in (False, True):
+            with self.subTest(prefetch=enabled):
+                released = threading.Event()
+                references = []
+
+                def load(row):
+                    payload = Payload()
+                    references.append(weakref.ref(payload, lambda ref: released.set()))
+                    return payload
+
+                with helper.ordered_decode([0], load, enabled=enabled) as rows:
+                    row, image = next(rows)
+                    self.assertEqual(row, 0)
+                    self.assertEqual(len(image.pixels), 16 * 1024 * 1024)
+                    del image
+                    gc.collect()
+                    # A completed worker may still be returning from its task.
+                    self.assertTrue(released.wait(timeout=2))
+                    self.assertIsNone(references[0]())
 
     def test_partial_consumption(self):
         stats = {}

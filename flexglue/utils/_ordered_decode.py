@@ -1,7 +1,7 @@
 """Ordered bounded CPU loading, no pixel/model policy.
 
-Uses two CPU workers. The
-consumer owns one current item; at most two further futures own decoded items.
+Uses two CPU workers and at most two pending reads. A caller retaining its
+previous item while advancing can transiently keep four decoded items alive.
 Close the context on early exit so pending work is cancelled and workers joined.
 """
 import time
@@ -29,13 +29,15 @@ def ordered_decode(rows, loader, *, enabled, stats=None):
     )
     if not enabled:
 
+        def read_row(row):
+            stats["submitted"] += 1
+            value = loader(row)
+            stats["consumed"] += 1
+            return row, value
+
         def serial():
             for row in rows:
-                stats["submitted"] += 1
-                value = loader(row)
-                stats["consumed"] += 1
-                yield row, value
-                del value
+                yield read_row(row)
 
         iterator = serial()
         try:
@@ -72,19 +74,21 @@ def ordered_decode(rows, loader, *, enabled, stats=None):
         if len(pending) > 2:
             raise RuntimeError("prefetch bound exceeded")
 
+    def receive():
+        row, future = pending.popleft()
+        waited = time.perf_counter()
+        value = future.result()
+        stats["consumerWaitSeconds"] += time.perf_counter() - waited
+        del future
+        stats["consumed"] += 1
+        submit()
+        return row, value
+
     def ordered():
         submit()
         submit()
         while pending:
-            row, future = pending.popleft()
-            waited = time.perf_counter()
-            value = future.result()
-            stats["consumerWaitSeconds"] += time.perf_counter() - waited
-            del future
-            stats["consumed"] += 1
-            submit()
-            yield row, value
-            del value
+            yield receive()
 
     iterator = ordered()
     try:

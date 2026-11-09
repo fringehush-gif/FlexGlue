@@ -178,7 +178,10 @@ def read_images(paths, grayscale=False, *, prefetch=False):
 
     Images have exactly the same RGB/grayscale pixels and layout as
     :func:`read_image`. With ``prefetch=True``, two CPU workers read ahead,
-    holding at most two prefetched images plus the current consumer image.
+    with at most two pending reads. Retaining the previous image while advancing
+    can transiently keep four decoded images alive; release it before advancing
+    to avoid that extra handoff image. The iterator does not retain yielded
+    pixels once the consumer drops them.
     Conversion, GPU transfers and model calls belong in the consuming thread.
 
     Always use ``with read_images(...) as images``: leaving the context cancels
