@@ -288,8 +288,33 @@ Batching has a few requirements:
 - ```refine```: Refine with RoMa v2 refiners (needs ```image``` in the inputs). Default: False.
 - ```refine_resize```: Input size of the refiners, as ```resize``` above. Default: (512, 512).
 - ```refine_scales```: Refiner strides, coarse to fine, fixed at construction. Default: (2, 1).
+- ```refine_selected_features```: Extract only the configured strides plus stride 1. Default: False. Evaluation can skip unused later stages; training still runs the full backbone.
 
 </details>
+
+Selected extraction can skip hooks on unused later layers. Custom `extract`
+overrides still run in full and are filtered to the required strides. Custom
+feature modules must accept `scales`, or their refiner must implement
+`extract_selected`; replacement refiners need that method to use the option.
+Supplied `fine_features` bypass extraction and need stride 1 plus every
+configured stride. A selected cache may lack levels required by another refiner.
+
+For repeated images, reuse the existing `fine_features` input. Compiled feature
+outputs can be overwritten by later graph generations: clone each image's
+features outside extraction, before the next compiled call, then retain the map:
+```python
+with torch.inference_mode():
+    fine_features = {
+        stride: feature.clone()
+        for stride, feature in matcher.refiner.extract_selected(
+            image, resize=matcher.conf.refine_resize
+        ).items()
+    }
+```
+Use the same refinement resize as the matching call. Reuse a map only with the
+same image, weights, resize, device and dtype. Put it in that image's
+`fine_features` input. Retained compiled refinement
+outputs likewise need owned copies before a later graph generation.
 
 The default values give a good trade-off between speed and accuracy. For increased efficiency, use fewer layers to linearly reduce run time:
 ```python
