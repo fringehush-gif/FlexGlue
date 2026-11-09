@@ -23,6 +23,7 @@ class SamplingValidityTest(unittest.TestCase):
         self.data = {
             "features": torch.zeros(1, 4, 2, 2),
             "image_size": torch.tensor([[16.0, 16.0]]),
+            "resized_size": torch.tensor([[16.0, 16.0]]),
         }
         self.context = SimpleNamespace(covisibility_score=torch.ones(1))
         self.conf = self.model.resolve_conf(
