@@ -1,0 +1,257 @@
+{
+  "scope": "Decoded RGB pixels through CPU normalization/upload, descriptor, nine-layer matcher, full refinement, validity gates and KDE sampling; model construction and PNG decode separate",
+  "hardware": "RTX 3080 Ti",
+  "timedImages": "FountainP11 0000/0001 at 1536 and 3072 source pixels",
+  "additionalQualityImages": "Repository Berlin and Lamar pairs, original sizes",
+  "configuration": {
+    "descriptorResize": [
+      512,
+      512
+    ],
+    "refinerResize": [
+      512,
+      512
+    ],
+    "refinerScales": [
+      2,
+      1
+    ],
+    "sampleCount": 5000,
+    "kdeBalance": true,
+    "seed": 1701
+  },
+  "sources": {
+    "upstream": "c6cbc7a933bb70ab58608e8835d99b6cc4adca1a",
+    "previous": "0cadbcc7dc314b712ce0d1073694cd83127641b5",
+    "integrated": "9afed5d3969a02c895912917db9119cc38278b8d"
+  },
+  "optIn": {
+    "refine_selected_features": true,
+    "refine_correlation": "triton",
+    "readout_backend": "triton",
+    "mmap_weights": true
+  },
+  "method": {
+    "order": "ABCDDCBA: upstream, previous, integrated, opt-in, then reverse",
+    "processesPerArm": 2,
+    "warmupsPerProcessResolution": 3,
+    "timedPairsPerProcessResolution": 6,
+    "wallAggregate": "Mean of two fresh-process medians",
+    "cpuAggregate": "Mean of twelve observations",
+    "memory": "Maximum Torch live/reserved CUDA allocation; mean RSS from 20 ms samples; constructor high-water RSS separate"
+  },
+  "timing": [
+    {
+      "resolution": 1536,
+      "arms": {
+        "upstream": {
+          "meanProcessMedianWallMs": 168.15,
+          "meanCpuMs": 416.703,
+          "meanCudaEventMs": 168.275,
+          "peakAllocatedMiB": 1330.294,
+          "peakReservedMiB": 1858.0,
+          "meanRssMiB": 2575.236,
+          "sampledPeakRssMiB": 2591.938,
+          "initPeakRssMiB": 2152.086
+        },
+        "previous": {
+          "meanProcessMedianWallMs": 160.253,
+          "meanCpuMs": 161.675,
+          "meanCudaEventMs": 160.379,
+          "peakAllocatedMiB": 1323.293,
+          "peakReservedMiB": 1794.0,
+          "meanRssMiB": 2639.193,
+          "sampledPeakRssMiB": 2655.32,
+          "initPeakRssMiB": 2152.246
+        },
+        "integrated": {
+          "meanProcessMedianWallMs": 160.571,
+          "meanCpuMs": 161.787,
+          "meanCudaEventMs": 160.545,
+          "peakAllocatedMiB": 1038.293,
+          "peakReservedMiB": 1410.0,
+          "meanRssMiB": 2638.004,
+          "sampledPeakRssMiB": 2643.211,
+          "initPeakRssMiB": 2152.828
+        },
+        "fused": {
+          "meanProcessMedianWallMs": 155.165,
+          "meanCpuMs": 156.343,
+          "meanCudaEventMs": 155.223,
+          "peakAllocatedMiB": 1022.293,
+          "peakReservedMiB": 1194.0,
+          "meanRssMiB": 2579.364,
+          "sampledPeakRssMiB": 2592.988,
+          "initPeakRssMiB": 1697.828
+        }
+      }
+    },
+    {
+      "resolution": 3072,
+      "arms": {
+        "upstream": {
+          "meanProcessMedianWallMs": 268.981,
+          "meanCpuMs": 680.396,
+          "meanCudaEventMs": 273.041,
+          "peakAllocatedMiB": 1438.294,
+          "peakReservedMiB": 1858.0,
+          "meanRssMiB": 2617.032,
+          "sampledPeakRssMiB": 2809.273,
+          "initPeakRssMiB": 2152.086
+        },
+        "previous": {
+          "meanProcessMedianWallMs": 233.697,
+          "meanCpuMs": 238.158,
+          "meanCudaEventMs": 236.352,
+          "peakAllocatedMiB": 1430.293,
+          "peakReservedMiB": 1794.0,
+          "meanRssMiB": 2675.002,
+          "sampledPeakRssMiB": 2731.078,
+          "initPeakRssMiB": 2152.246
+        },
+        "integrated": {
+          "meanProcessMedianWallMs": 234.102,
+          "meanCpuMs": 238.62,
+          "meanCudaEventMs": 237.263,
+          "peakAllocatedMiB": 1146.293,
+          "peakReservedMiB": 1410.0,
+          "meanRssMiB": 2660.365,
+          "sampledPeakRssMiB": 2737.227,
+          "initPeakRssMiB": 2152.828
+        },
+        "fused": {
+          "meanProcessMedianWallMs": 231.529,
+          "meanCpuMs": 238.541,
+          "meanCudaEventMs": 236.485,
+          "peakAllocatedMiB": 1130.293,
+          "peakReservedMiB": 1286.0,
+          "meanRssMiB": 2623.692,
+          "sampledPeakRssMiB": 2679.488,
+          "initPeakRssMiB": 1697.828
+        }
+      }
+    }
+  ],
+  "quality": [
+    {
+      "case": "fountain-1536",
+      "allDenseFieldsAndGatesExact": true,
+      "maxDifferentSampleRows": 2,
+      "geometricInliersOf5000": {
+        "upstream": [
+          4983,
+          4983
+        ],
+        "previous": [
+          4983,
+          4983
+        ],
+        "integrated": [
+          4983,
+          4983
+        ],
+        "fused": [
+          4983,
+          4983
+        ]
+      },
+      "geometryMethod": "Fixed-seed fundamental-matrix RANSAC, one pixel at the 512 descriptor frame; geometric consistency"
+    },
+    {
+      "case": "fountain-3072",
+      "allDenseFieldsAndGatesExact": true,
+      "maxDifferentSampleRows": 0,
+      "geometricInliersOf5000": {
+        "upstream": [
+          4962,
+          4962
+        ],
+        "previous": [
+          4962,
+          4962
+        ],
+        "integrated": [
+          4962,
+          4962
+        ],
+        "fused": [
+          4962,
+          4962
+        ]
+      },
+      "geometryMethod": "Fixed-seed fundamental-matrix RANSAC, one pixel at the 512 descriptor frame; geometric consistency"
+    },
+    {
+      "case": "berlin",
+      "allDenseFieldsAndGatesExact": true,
+      "maxDifferentSampleRows": 4,
+      "geometricInliersOf5000": {
+        "upstream": [
+          3014,
+          3014
+        ],
+        "previous": [
+          3014,
+          3014
+        ],
+        "integrated": [
+          3014,
+          3014
+        ],
+        "fused": [
+          3014,
+          3014
+        ]
+      },
+      "geometryMethod": "Fixed-seed fundamental-matrix RANSAC, one pixel at the 512 descriptor frame; geometric consistency"
+    },
+    {
+      "case": "lamar",
+      "allDenseFieldsAndGatesExact": true,
+      "maxDifferentSampleRows": 2,
+      "geometricInliersOf5000": {
+        "upstream": [
+          2835,
+          2835
+        ],
+        "previous": [
+          2835,
+          2835
+        ],
+        "integrated": [
+          2835,
+          2835
+        ],
+        "fused": [
+          2835,
+          2835
+        ]
+      },
+      "geometryMethod": "Fixed-seed fundamental-matrix RANSAC, one pixel at the 512 descriptor frame; geometric consistency"
+    }
+  ],
+  "validation": {
+    "wslCpu": {
+      "tests": 233,
+      "skipped": 26,
+      "failures": 0
+    },
+    "windowsCpu": {
+      "tests": 233,
+      "skipped": 29,
+      "failures": 0
+    },
+    "cuda": {
+      "tests": 91,
+      "skipped": 0,
+      "failures": 0
+    },
+    "ort130": {
+      "windowsTests": 32,
+      "wslTests": 32,
+      "failures": 0
+    },
+    "ort1311": "Both full CPU suites use ORT 1.31.1",
+    "windowsReleasedModel": "Default CPU outputs exact at both source sizes; no optional RoMa refinement"
+  }
+}

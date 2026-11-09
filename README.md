@@ -304,7 +304,6 @@ Batching has a few requirements:
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
 - ```describe_mp```: Optional resident `"float16"` descriptor backbone and feature head; `None` keeps the float32 descriptor. Default: `None`.
 - ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; other configurations use ordinary loading. Checkpoint read errors still propagate. Default: False.
-- ```rgb8_backend```: Optional RGB8 preparation backend: `"torch"`, `"torch-compile"`, or `"triton"`; default `None`.
 - ```rgb8_host_sampling```: Select resize samples on the host before upload with an RGB8 backend. Default: False.
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```rgb8_triton```: Experimental direct RGB8 preparation for the CUDA descriptor; accepts HWC RGB8 NumPy inputs when enabled. Default: False.

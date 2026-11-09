@@ -1,5 +1,4 @@
 import importlib.util
-import math
 import sys
 import tempfile
 import unittest
