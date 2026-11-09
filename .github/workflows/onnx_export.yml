@@ -12,7 +12,7 @@ on:
       - "flexglue/**"
       - "onnx/**"
       - "tests/test_early_stop*.py"
-      - "tests/test_onnx_feeds.py"
+      - "tests/test_onnx*.py"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
   pull_request:
@@ -20,7 +20,7 @@ on:
       - "flexglue/**"
       - "onnx/**"
       - "tests/test_early_stop*.py"
-      - "tests/test_onnx_feeds.py"
+      - "tests/test_onnx*.py"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
 
@@ -60,7 +60,7 @@ jobs:
       - name: Check early-stop and input contracts
         run: |
           python -m unittest discover -s tests -p 'test_early_stop*.py' -v
-          python -m unittest discover -s tests -p 'test_onnx_feeds.py' -v
+          python -m unittest discover -s tests -p 'test_onnx*.py' -v
 
       - name: Cache the weights
         uses: actions/cache@v4
