@@ -28,7 +28,9 @@ def _read_state_dict(weights: str, *, allow_mmap: bool = False) -> dict:
         if allow_mmap and _mapped_local_checkpoint(weights):
             return torch.load(weights, map_location="cpu", weights_only=True, mmap=True)
         return torch.load(weights, map_location="cpu", weights_only=True)
-    return torch.hub.load_state_dict_from_url(weights, map_location="cpu")
+    return torch.hub.load_state_dict_from_url(
+        weights, map_location="cpu", weights_only=True
+    )
 
 
 def load_state_dict(

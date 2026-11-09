@@ -284,7 +284,8 @@ Batching has a few requirements:
 `DINOv3Descriptor`:
 - ```resize```: Backbone input size: an int sets the long side (aspect kept, sides floored to multiples of 32), ```(h, w)``` squashes. Default: (512, 512).
 - ```describe```: Also return descriptors at the given keypoints. Default: True.
-- ```mp```: Keep the backbone and feature head in resident ```"float16"``` weights and return float32 features and keypoint descriptors. ```None``` retains the float32 descriptor. Default: ```None```.
+- ```mp```: Keep the descriptor backbone and feature head in resident `"float16"` weights; `None` retains float32. Default: `None`.
+- ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; other configurations use ordinary loading. Checkpoint read errors still propagate. Default: False.
 - ```weights```: Path or URL of the weights. Default: the release weights.
 - ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; other configurations use ordinary loading. Checkpoint read errors still propagate. Default: False.
 
@@ -297,7 +298,8 @@ Batching has a few requirements:
 - ```early_stop_layers```: Intermediate layers to check, e.g. `(2, 4, 6, 8)` to match the released ONNX schedule. Default: `None` (every intermediate layer); `()` disables intermediate checks. Layers at or beyond a per-call `n_layers` are ignored; the decay exponent still uses the full model depth.
 - ```remove_border_px```: Drop matches this close to the border, in pixels of the descriptor input. Default: 0.0.
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
-- ```describe_mp```: Optional built-in descriptor precision. ```"float16"``` stores its backbone and feature head in half precision; preprocessing, output features, and the matcher keep their existing dtypes. Default: ```None``` (float32 descriptor).
+- ```describe_mp```: Optional resident `"float16"` descriptor backbone and feature head; `None` keeps the float32 descriptor. Default: `None`.
+- ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; other configurations use ordinary loading. Checkpoint read errors still propagate. Default: False.
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```rgb8_triton```: Experimental direct RGB8 preparation for the CUDA descriptor; accepts HWC RGB8 NumPy inputs when enabled. Default: False.
 - ```rgb8_backend```: Optional RGB8 preparation: ```"torch"```, ```"torch-compile"``` or ```"triton"```. Default: ```None``` (use ```rgb8_triton```); an explicit backend overrides that legacy flag.
@@ -527,3 +529,7 @@ Both correlation backends share model parameters and checkpoints.
 threshold arithmetic. It keeps Torch cumulative sums and window readout.
 Other inputs and compiled heads use native Torch; the default remains `"torch"`.
 Both backend choices are fixed at model construction.
+
+URL checkpoints use restricted deserialization too. The hub loader must accept
+`weights_only=True`; an older helper refuses that URL call rather than retrying
+unrestricted loading. An already downloaded local checkpoint remains supported.
