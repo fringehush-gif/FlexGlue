@@ -32,6 +32,22 @@ def select_upload_pixels(rgb: np.ndarray) -> tuple[np.ndarray, int]:
     return np.array(rgb, dtype=np.uint8, copy=True, order="C"), 0
 
 
+def select_resize_samples(source, target_hw):
+    """Keep the exact bilinear lattice for integer downscales, NumPy or Torch."""
+    height, width, channels = source.shape
+    th, tw = target_hw
+    if height >= th and width >= tw and height % th == 0 and width % tw == 0:
+        sy, sx = height // th, width // tw
+        # Odd factors retain the zero-weight neighbour for exceptional LUTs.
+        ky, kx = min(sy, 2 + sy % 2), min(sx, 2 + sx % 2)
+        if ky < sy or kx < sx:
+            y, x = (sy - ky) // 2, (sx - kx) // 2
+            return source.reshape(th, sy, tw, sx, channels)[
+                :, y : y + ky, :, x : x + kx, :
+            ].reshape(th * ky, tw * kx, channels)
+    return source
+
+
 @dataclass
 class PreparedDescriptorInput:
     tensor: torch.Tensor
@@ -53,6 +69,7 @@ def prepare_rgb8(
     target_hw: tuple[int, int] = (512, 512),
     device: Union[torch.device, str] = "cuda",
     codebook_device: Optional[torch.Tensor] = None,
+    host_sampling: bool = False,
     resize: Callable,
 ) -> PreparedDescriptorInput:
     if (
@@ -62,6 +79,8 @@ def prepare_rgb8(
         or rgb.shape[2] != 3
     ):
         raise ValueError("expected HWC RGB8 NumPy image")
+    if not isinstance(host_sampling, bool):
+        raise ValueError("host_sampling must be a bool")
     src_h, src_w = (int(v) for v in rgb.shape[:2])
     if not (
         1 <= src_h <= 65535 and 1 <= src_w <= 65535 and src_h * src_w <= 64_000_000
@@ -83,11 +102,15 @@ def prepare_rgb8(
     device = torch.device("cuda", current_index)
     stream = torch.cuda.current_stream(device)
     host_pixels, source_is_bgr = select_upload_pixels(rgb)
+    if host_sampling:
+        host_pixels = np.ascontiguousarray(
+            select_resize_samples(host_pixels, target_hw)
+        )
     # Blocking Torch copy owns device bytes before the borrowed host view can retire.
     source = torch.from_numpy(host_pixels).to(device=device, non_blocking=False)
     if (
         source.dtype != torch.uint8
-        or source.shape != (src_h, src_w, 3)
+        or tuple(source.shape) != host_pixels.shape
         or not source.is_contiguous()
     ):
         raise RuntimeError("RGB8 upload contract differs")
@@ -127,7 +150,7 @@ def describe_prepared(
 ) -> dict:
     prepared.require_current_stream()
     x = prepared.tensor
-    features = descriptor.encode(x)
+    features = descriptor._forward({"image": x}, resize=tuple(x.shape[-2:]))["features"]
     pred = {"features": features, "image_size": prepared.original_size.to(x)}
     if keypoints is not None:
         if descriptor.conf.describe:

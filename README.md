@@ -300,6 +300,8 @@ Batching has a few requirements:
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
 - ```describe_mp```: Optional resident `"float16"` descriptor backbone and feature head; `None` keeps the float32 descriptor. Default: `None`.
 - ```mmap_weights```: Opt in to mapped loading of a compatible local checkpoint. Keep that file immutable while CPU model weights use it; other configurations use ordinary loading. Checkpoint read errors still propagate. Default: False.
+- ```rgb8_backend```: Optional RGB8 preparation backend: `"torch"`, `"torch-compile"`, or `"triton"`; default `None`.
+- ```rgb8_host_sampling```: Select resize samples on the host before upload with an RGB8 backend. Default: False.
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```rgb8_triton```: Experimental direct RGB8 preparation for the CUDA descriptor; accepts HWC RGB8 NumPy inputs when enabled. Default: False.
 - ```rgb8_backend```: Optional RGB8 preparation: ```"torch"```, ```"torch-compile"``` or ```"triton"```. Default: ```None``` (use ```rgb8_triton```); an explicit backend overrides that legacy flag.
@@ -451,7 +453,25 @@ matcher = FlexGlue().eval().cuda().compile(mode="reduce-overhead")
 ```
 The transformer layers and the correspondence heads are compiled into CUDA graphs. Keypoints are padded to the next of `static_lengths` (512, 1024, 2048, 4096 by default), larger inputs fall back to eager mode. The first calls of each new input size are slow while compiling.
 
-Descriptor encoding is currently eager. Future descriptor compilation should reach encoding for both tensor and accelerated RGB8 inputs; the latter bypasses `forward` and calls `encode` directly. Preserve cached features across later images and keep copied descriptors independent. Before changing descriptor compilation, run the RGB8 tests with `FLEXGLUE_TEST_RGB8_CUDA=1` for accelerated routing and lifetime checks. Ordinary CPU CI covers copied-model weights.
+For HWC RGB8 NumPy inputs, `rgb8_backend` enables optional CUDA preparation.
+The regular Torch path is used for unsupported settings, training, gradients,
+non-CUDA devices, unavailable Triton, or custom preprocessing. Direct `DINOv3Descriptor.describe_rgb8`
+also accepts a backend selection. The caller must not mutate input bytes during
+the blocking upload. Byte input uses the normalization buffers' dtype before
+resizing. Tensor and RGB8 inputs share encoder compilation; custom preprocessing
+receives the original-resolution tensor through the regular path. Triton is optional for the Triton preparation backend.
+
+`rgb8_host_sampling=True` is an optional choice alongside `rgb8_backend`. It
+packs the exact samples needed for eligible integer downscales before uploading;
+other sizes keep the original pixels. `DINOv3Descriptor.describe_rgb8` and the
+low-level `prepare_rgb8` functions accept `host_sampling=True` directly. The
+default is off. Packing can cost more than the saved transfer: a small local
+screen of an earlier automatic-selection prototype using the same helper on one
+real 3072 input measured 2.45 → 3.38 ms on an RTX 3080 Ti and 13.52 → 5.61 ms
+on an RTX 3060 (Torch RGB, two processes per arm, five calls per process). The
+explicit option itself was not timed. A separate generated 6144x4096 input also benefited; it was not
+a real photograph. These are preparation-only observations, not whole-model
+or reconstruction results.
 
 
 ### Ordered image prefetch

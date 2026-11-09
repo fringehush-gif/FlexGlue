@@ -10,12 +10,11 @@ import importlib.util
 import os
 import sys
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from unittest.mock import patch
 
 import numpy as np
 import torch
-from test_descriptor_mp import TinyBackbone, TinyHead
 from torch import nn
 
 from flexglue import FlexGlue
@@ -23,13 +22,26 @@ from flexglue.descriptor import DINOv3Descriptor
 from flexglue.utils.preprocess import numpy_image_to_torch
 
 
-class TinyStride8Backbone(TinyBackbone):
+class TinyStride8Backbone(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv2d(3, 4, 1)
+
     def forward(self, x):
         return [torch.nn.functional.avg_pool2d(self.conv(x), 8)]
 
 
-def tiny_descriptor(resize=(32, 32), mp=None):
-    # Reuse the existing descriptor precision test's generated mock modules.
+class TinyHead(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv2d(4, 8, 1)
+
+    def forward(self, features):
+        return self.conv(features[0])
+
+
+def tiny_descriptor(resize=(32, 32), descriptor_cls=DINOv3Descriptor, mp=None):
+    # Supply generated weights at the existing reader boundary.
     torch.manual_seed(7)
     backbone, head, descriptor_head = TinyStride8Backbone(), TinyHead(), nn.Linear(8, 4)
     state = {
@@ -43,9 +55,7 @@ def tiny_descriptor(resize=(32, 32), mp=None):
     with patch("flexglue.descriptor.ConvNeXt", TinyStride8Backbone), patch(
         "flexglue.descriptor.LinearConvHead", TinyHead
     ):
-        return DINOv3Descriptor(
-            weights="unused", state_dict=state, resize=resize, mp=mp
-        ).eval()
+        return descriptor_cls(weights="unused", state_dict=state, resize=resize, mp=mp).eval()
 
 
 def tiny_matcher():
@@ -178,10 +188,134 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
             torch.testing.assert_close(copied.describe(image)["features"], before)
             copied.backbone.conv.weight.add_(1)
             self.assertFalse(torch.equal(copied.describe(image)["features"], before))
+            self.assertPacketEqual(
+                copied.describe(image)["features"],
+                copied.describe_rgb8(self.image)["features"],
+            )
             torch.testing.assert_close(descriptor.describe(image)["features"], before)
             torch.testing.assert_close(
                 descriptor.describe_rgb8(self.image)["features"], before
             )
+
+    def test_compilation_keeps_overrides_and_repeated_compilation(self):
+        observed = []
+
+        class ShiftedDescriptor(DINOv3Descriptor):
+            def forward(self, data, resize=None):
+                observed.append(type(data["image"]))
+                result = super().forward(data, resize)
+                return {**result, "features": result["features"] + 1}
+
+        image = numpy_image_to_torch(self.image)
+        real_compile = torch.compile
+        for override in ("subclass", "instance"):
+            matcher = tiny_matcher()
+            matcher.descriptor = tiny_descriptor(descriptor_cls=ShiftedDescriptor)
+            if override == "instance":
+                forward = matcher.descriptor.forward
+                matcher.descriptor.forward = lambda *args, **kw: forward(*args, **kw)
+            with self.subTest(override=override), torch.no_grad():
+                expected = matcher.descriptor({"image": image})
+                self.assertPacketEqual(
+                    expected["features"], matcher.descriptor.describe(image)["features"]
+                )
+                with patch(
+                    "torch.compile",
+                    side_effect=lambda fn, **kw: real_compile(
+                        fn, backend="eager", fullgraph=True
+                    ),
+                ):
+                    for _ in range(2):
+                        matcher.compile()
+                        observed.clear()
+                        self.assertPacketEqual(
+                            expected, matcher.descriptor.describe_rgb8(self.image)
+                        )
+                        self.assertEqual(observed, [np.ndarray])
+                        conf = matcher.resolve_conf(
+                            dict(
+                                describe=True,
+                                describe_resize=(32, 32),
+                                rgb8_backend="torch",
+                            )
+                        )
+                        actual, _ = matcher.describe_inputs(
+                            {"image": self.image}, expected, conf
+                        )
+                        self.assertEqual(observed, [np.ndarray, np.ndarray])
+                        self.assertPacketEqual(expected["features"], actual["features"])
+
+    def test_module_dtype_transforms_follow_tensor_reference(self):
+        image = numpy_image_to_torch(self.image)
+        for dtype in (torch.float64, torch.float32):
+            with self.subTest(dtype=dtype):
+                self.descriptor.to(dtype=dtype)
+                with torch.no_grad():
+                    expected = self.descriptor.describe(image.to(dtype=dtype))
+                    actual = self.descriptor.describe_rgb8(self.image)
+                self.assertPacketEqual(expected["features"], actual["features"])
+                self.assertPacketEqual(expected["image_size"], actual["image_size"])
+
+    def test_module_half_uses_typed_tensor_reference(self):
+        self.descriptor.half()
+        image = numpy_image_to_torch(self.image).half()
+        with torch.no_grad():
+            expected = self.descriptor.describe(image)
+            actual = self.descriptor.describe_rgb8(self.image)
+        self.assertGreater(expected["features"].numel(), 0)
+        self.assertPacketEqual(expected["features"], actual["features"])
+        self.assertPacketEqual(expected["image_size"], actual["image_size"])
+
+    def test_module_dtypes_with_cpu_autocast_follow_typed_tensor_reference(self):
+        image = numpy_image_to_torch(self.image)
+        for dtype in (torch.float32, torch.float16, torch.bfloat16, torch.float64):
+            self.descriptor.to(dtype=dtype)
+            for enabled in (False, True):
+                with self.subTest(dtype=dtype, autocast=enabled), torch.no_grad():
+                    autocast_dtype = (
+                        torch.float16 if dtype == torch.float16 else torch.bfloat16
+                    )
+                    with torch.autocast("cpu", dtype=autocast_dtype, enabled=enabled):
+                        expected = self.descriptor.describe(image.to(dtype=dtype))
+                        actual = self.descriptor.describe_rgb8(self.image)
+                self.assertGreater(expected["features"].numel(), 0)
+                self.assertPacketEqual(expected["features"], actual["features"])
+                self.assertPacketEqual(expected["image_size"], actual["image_size"])
+
+    def test_prepared_input_keeps_resize_and_forward_dispatch(self):
+        from flexglue.utils._rgb8 import PreparedDescriptorInput, describe_prepared
+
+        descriptor = tiny_descriptor(resize=(256, 256))
+        image = numpy_image_to_torch(self.image)[None]
+        pixels = descriptor.preprocess(image, resize=(512, 512))
+        original_size = torch.tensor([[image.shape[-1], image.shape[-2]]]).float()
+        prepared = PreparedDescriptorInput(pixels, original_size, (pixels,), None)
+        calls = []
+
+        def hook(module, args, result):
+            calls.append(1)
+            return {**result, "features": result["features"] + 1}
+
+        handle = descriptor.register_forward_hook(hook)
+        try:
+            with torch.inference_mode():
+                expected = descriptor.describe(image, resize=(512, 512))
+                hooked = descriptor({"image": image}, resize=(512, 512))
+                self.assertEqual(calls, [1])
+                self.assertFalse(torch.equal(hooked["features"], expected["features"]))
+                with patch.object(
+                    PreparedDescriptorInput, "require_current_stream"
+                ) as stream:
+                    actual = describe_prepared(descriptor, prepared)
+                fallback = descriptor.describe_rgb8(self.image, resize=(512, 512))
+            stream.assert_called_once()
+            self.assertEqual(calls, [1])
+            self.assertEqual(actual["features"].shape[-2:], (64, 64))
+            self.assertPacketEqual(expected["features"], actual["features"])
+            self.assertPacketEqual(expected["features"], fallback["features"])
+            self.assertPacketEqual(original_size, actual["image_size"])
+        finally:
+            handle.remove()
 
     def test_invalid_direct_inputs_are_rejected(self):
         for image in (
@@ -215,14 +349,83 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
             self.descriptor._apply(fail)
         self.assertIsNone(self.descriptor._rgb8_codebook)
 
-    def test_default_off_and_boolean_validation(self):
-        self.assertIs(FlexGlue.default_conf["rgb8_triton"], False)
+    def test_default_off_and_backend_validation(self):
+        self.assertIsNone(FlexGlue.default_conf["rgb8_backend"])
+        self.assertFalse(FlexGlue.default_conf["rgb8_triton"])
         matcher = tiny_matcher()
-        self.assertIs(matcher.conf.rgb8_triton, False)
-        with self.assertRaisesRegex(ValueError, "rgb8_triton"):
-            matcher.resolve_conf({"rgb8_triton": "yes"})
-        with self.assertRaisesRegex(ValueError, "rgb8_triton"):
-            FlexGlue(weights=None, describe=False, rgb8_triton=1)
+        for value in (1, "yes", None):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "rgb8_triton"
+            ):
+                matcher.resolve_conf({"rgb8_triton": value})
+        self.assertIsNone(matcher.conf.rgb8_backend)
+        for value in (True, 1, "unknown"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "rgb8_backend"
+            ):
+                matcher.resolve_conf({"rgb8_backend": value})
+
+    def test_matcher_byte_inputs_keep_descriptor_module_hooks(self):
+        matcher = tiny_matcher()
+        tensor = numpy_image_to_torch(self.image)
+        calls = []
+
+        def hook(module, args, result):
+            calls.append(type(args[0]["image"]))
+            return {**result, "features": result["features"] + 1}
+
+        handle = matcher.descriptor.register_forward_hook(hook)
+        try:
+            conf = matcher.resolve_conf(dict(describe=True, rgb8_backend="torch"))
+            with torch.no_grad():
+                expected, _ = matcher.describe_inputs(
+                    {"image": tensor},
+                    {
+                        "features": torch.ones(1, 8, 4, 4),
+                        "image_size": torch.tensor([[32.0, 32.0]]),
+                    },
+                    conf,
+                )
+                actual, _ = matcher.describe_inputs(
+                    {"image": self.image},
+                    {
+                        "features": torch.ones(1, 8, 4, 4),
+                        "image_size": torch.tensor([[32.0, 32.0]]),
+                    },
+                    conf,
+                )
+            self.assertEqual(calls, [torch.Tensor, np.ndarray])
+            for key in ("features", "image_size", "resized_size"):
+                self.assertPacketEqual(expected[key], actual[key])
+        finally:
+            handle.remove()
+
+    def test_byte_detector_receives_one_normalized_chw_image(self):
+        matcher = tiny_matcher()
+        images = (self.image, self.image[:, :, ::-1])
+        observed = []
+
+        class Detector(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("anchor", torch.zeros(1))
+
+            def extract(self, image):
+                observed.append(image.clone())
+                return {"keypoints": image.new_tensor([[[4.0, 5.0]]])}
+
+        # Detector placement is independent of matcher placement.
+        matcher.to("meta")
+        with patch.object(matcher, "match", side_effect=lambda *data, **kw: data):
+            data = matcher.match_pair(
+                *images, detector=Detector(), rgb8_backend="torch"
+            )
+        self.assertEqual(len(observed), 2)
+        for image, pixels, packet in zip(images, observed, data):
+            self.assertEqual(pixels.shape, (3, *image.shape[:2]))
+            self.assertPacketEqual(numpy_image_to_torch(image), pixels)
+            self.assertIs(packet["image"], image)
+            self.assertEqual(packet["keypoints"].shape, (1, 1, 2))
 
     def test_actual_cpu_match_optin_matches_torch_and_feature_packets(self):
         matcher = tiny_matcher()
@@ -244,7 +447,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
         with forbid_triton(), torch.no_grad():
             reference, rng = run([{"image": tensor} for tensor in tensors])
             actual, actual_rng = run(
-                [{"image": image} for image in images], rgb8_triton=True
+                [{"image": image} for image in images], rgb8_backend="triton"
             )
             self.assertEqual(len(reference), 16)
             self.assertPacketEqual(reference, actual)
@@ -265,7 +468,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
             candidate = matcher.match(
                 *packets,
                 describe=False,
-                rgb8_triton=True,
+                rgb8_backend="triton",
                 max_num_samples=4,
                 min_covisibility=0.0,
                 early_stop_decay=None,
@@ -275,7 +478,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
     def test_refiner_description_retains_torch_image(self):
         matcher = tiny_matcher()
         conf = matcher.resolve_conf(
-            {"describe": True, "describe_resize": (32, 32), "rgb8_triton": True}
+            {"describe": True, "describe_resize": (32, 32), "rgb8_backend": "triton"}
         )
         conf.refine = True  # routing only; no refiner weights or downloads
         with forbid_triton(), torch.no_grad():
@@ -292,6 +495,49 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
     "set FLEXGLUE_TEST_RGB8_CUDA=1 for optional Linux CUDA checks",
 )
 class RGB8CudaTest(PacketAssertions, unittest.TestCase):
+    def test_custom_preprocess_uses_original_pixels(self):
+        from flexglue.utils import rgb8_torch, rgb8_triton
+
+        stock_preprocess = DINOv3Descriptor.preprocess
+
+        def nonlinear_preprocess(descriptor, images, resize=None):
+            return stock_preprocess(descriptor, images.square(), resize)
+
+        class ContrastDescriptor(DINOv3Descriptor):
+            preprocess = nonlinear_preprocess
+
+        rgb = np.random.default_rng(19).integers(0, 256, (513, 769, 3), dtype=np.uint8)
+        for kind in ("subclass", "instance", "class"):
+            descriptor = tiny_descriptor(
+                (512, 512),
+                descriptor_cls=(
+                    ContrastDescriptor if kind == "subclass" else DINOv3Descriptor
+                ),
+            ).cuda()
+            if kind == "instance":
+                descriptor.preprocess = nonlinear_preprocess.__get__(descriptor)
+            override = (
+                patch.object(DINOv3Descriptor, "preprocess", nonlinear_preprocess)
+                if kind == "class"
+                else nullcontext()
+            )
+            with override, torch.inference_mode():
+                expected = descriptor({"image": numpy_image_to_torch(rgb).cuda()})
+                for backend in ("torch", "torch-compile", "triton"):
+                    with self.subTest(kind=kind, backend=backend), patch.object(
+                        rgb8_torch,
+                        "prepare_rgb8",
+                        side_effect=AssertionError("fast path"),
+                    ), patch.object(
+                        rgb8_triton,
+                        "prepare_rgb8",
+                        side_effect=AssertionError("fast path"),
+                    ):
+                        actual = descriptor.describe_rgb8(rgb, backend=backend)
+                    self.assertPacketEqual(expected["features"], actual["features"])
+                    self.assertPacketEqual(expected["image_size"], actual["image_size"])
+                    self.assertIsNone(descriptor._rgb8_codebook)
+
     def setUp(self):
         if not sys.platform.startswith("linux") or not torch.cuda.is_available():
             self.skipTest("Linux CUDA is required for the optional Triton path")
@@ -325,6 +571,119 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 self.assertPacketEqual(expected_pixels, prepared.tensor)
                 self.assertPacketEqual(self.descriptor({"image": image}), actual)
                 torch.cuda.synchronize()
+
+    def test_accelerated_module_dtype_follows_tensor_reference(self):
+        from flexglue.utils import rgb8_triton
+
+        rgb = np.arange(512 * 512 * 3, dtype=np.uint32).astype(np.uint8)
+        rgb = rgb.reshape(512, 512, 3)
+        tensor = numpy_image_to_torch(rgb).cuda()
+        self.descriptor.conf.resize = (512, 512)
+        for dtype in (torch.float64, torch.float16, torch.bfloat16, torch.float32):
+            with self.subTest(dtype=dtype), torch.inference_mode():
+                self.descriptor.to(dtype=dtype)
+                expected = self.descriptor.describe(tensor.to(dtype=dtype))
+                with patch.object(
+                    rgb8_triton, "prepare_rgb8", wraps=rgb8_triton.prepare_rgb8
+                ) as prepare:
+                    actual = self.descriptor.describe_rgb8(rgb)
+                if dtype == torch.float32:
+                    prepare.assert_called_once()
+                else:
+                    prepare.assert_not_called()
+                self.assertPacketEqual(expected["features"], actual["features"])
+                self.assertPacketEqual(expected["image_size"], actual["image_size"])
+
+    def test_byte_detector_with_independent_device_matches(self):
+        matcher = tiny_matcher().cuda()
+        rgb = np.arange(32 * 32 * 3, dtype=np.uint32).astype(np.uint8)
+        rgb = rgb.reshape(32, 32, 3)
+        observed = []
+
+        class Detector(nn.Module):
+            def __init__(self, device):
+                super().__init__()
+                self.register_buffer("anchor", torch.zeros(1, device=device))
+
+            def extract(self, image):
+                observed.append(image.device)
+                if image.device != self.anchor.device:
+                    raise AssertionError("detector input device differs")
+                return {
+                    "keypoints": self.anchor.new_tensor([[[4.0, 4.0], [16.0, 16.0]]])
+                }
+
+        outputs = []
+        with torch.inference_mode():
+            for device in ("cuda", "cpu"):
+                torch.manual_seed(42)
+                outputs.append(
+                    matcher.match_pair(
+                        rgb,
+                        rgb,
+                        detector=Detector(device),
+                        describe=True,
+                        rgb8_backend="torch",
+                        describe_resize=(32, 32),
+                        min_covisibility=0.0,
+                        early_stop_decay=None,
+                    )
+                )
+        self.assertEqual(
+            observed, [torch.device("cuda:0")] * 2 + [torch.device("cpu")] * 2
+        )
+        self.assertGreater(len(outputs[0]), 0)
+        self.assertPacketEqual(*outputs)
+
+    def test_matcher_hook_wraps_accelerated_byte_input(self):
+        from flexglue.utils import rgb8_torch
+
+        matcher = tiny_matcher().cuda()
+        rgb = np.arange(512 * 512 * 3, dtype=np.uint32).astype(np.uint8)
+        rgb = rgb.reshape(512, 512, 3)
+        calls = []
+
+        def hook(module, args, result):
+            calls.append(type(args[0]["image"]))
+            return {**result, "features": result["features"] + 1}
+
+        handle = matcher.descriptor.register_forward_hook(hook)
+        try:
+            conf = matcher.resolve_conf(
+                dict(describe=True, describe_resize=(512, 512), rgb8_backend="torch")
+            )
+            with torch.inference_mode():
+                tensor = {"image": numpy_image_to_torch(rgb).cuda()}
+                expected = matcher.describe_inputs(tensor, tensor, conf)
+                with patch.object(
+                    rgb8_torch, "prepare_rgb8", wraps=rgb8_torch.prepare_rgb8
+                ) as prepare:
+                    actual = matcher.describe_inputs(
+                        {"image": rgb}, {"image": rgb}, conf
+                    )
+                self.assertEqual(prepare.call_count, 2)
+            self.assertEqual(calls, [torch.Tensor] * 2 + [np.ndarray] * 2)
+            for left, right in zip(expected, actual):
+                for key in ("features", "image_size", "resized_size"):
+                    self.assertPacketEqual(left[key], right[key])
+        finally:
+            handle.remove()
+
+    def test_accelerated_resize_override(self):
+        rgb = np.arange(320 * 480 * 3, dtype=np.uint32).astype(np.uint8)
+        rgb = rgb.reshape(320, 480, 3)
+        descriptor = tiny_descriptor(resize=(256, 256)).cuda()
+        tensor = numpy_image_to_torch(rgb).cuda()
+        with torch.inference_mode():
+            expected = descriptor.describe(tensor, resize=(512, 512))
+            for backend in ("torch", "triton"):
+                with self.subTest(backend=backend):
+                    actual = descriptor.describe_rgb8(
+                        rgb, resize=(512, 512), backend=backend
+                    )
+                    self.assertEqual(actual["features"].shape[-2:], (64, 64))
+                    self.assertPacketEqual(expected["features"], actual["features"])
+                    self.assertPacketEqual(expected["image_size"], actual["image_size"])
 
     def test_descriptor_compilation_covers_both_input_routes(self):
         from flexglue.utils import rgb8_triton
@@ -373,12 +732,9 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
             ) as prepare:
                 descriptor.describe_rgb8(rgb)
             prepare.assert_called_once()
-            # Both are eager today; future descriptor compilation must reach both.
-            self.assertEqual(
-                tensor_compiled,
-                compiled_encoding,
-                "Descriptor compilation must cover tensor and accelerated RGB8 inputs",
-            )
+            # Both routes must enter the shared compiled tensor forward.
+            self.assertTrue(tensor_compiled)
+            self.assertTrue(compiled_encoding)
 
     def test_cached_features_survive_subsequent_images(self):
         matcher = tiny_matcher().cuda().compile()

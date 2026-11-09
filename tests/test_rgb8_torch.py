@@ -13,7 +13,11 @@ from torch.nn import functional as F
 
 from flexglue import FlexGlue
 from flexglue.utils import rgb8_torch
-from flexglue.utils._rgb8 import fp32_codebook, select_upload_pixels
+from flexglue.utils._rgb8 import (
+    fp32_codebook,
+    select_resize_samples,
+    select_upload_pixels,
+)
 from flexglue.utils.preprocess import numpy_image_to_torch
 
 
@@ -58,6 +62,33 @@ def exceptional_neighbours(test, device, compiled):
 
 
 class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
+    def test_host_selection_shares_the_tensor_lattice(self):
+        for sy, sx in ((1, 1), (2, 3), (3, 5), (4, 6), (5, 8), (31, 32)):
+            for th, tw in ((1, 1), (5, 7)):
+                shape = (th * sy, tw * sx, 3)
+                image = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+                selected = select_resize_samples(image, (th, tw))
+                tensor = select_resize_samples(torch.from_numpy(image), (th, tw))
+                np.testing.assert_array_equal(selected, tensor.numpy())
+                for table in tables("cpu"):
+                    expected = reference(
+                        torch.from_numpy(image), table, (th, tw), False
+                    )
+                    actual = reference(
+                        torch.from_numpy(selected.copy()), table, (th, tw), False
+                    )
+                    self.assertPacketEqual(expected, actual)
+        for shape, target in (
+            ((9, 13, 3), (5, 7)),
+            ((1, 1, 3), (5, 7)),
+            ((5, 7, 3), (5, 7)),
+            ((10, 21, 3), (5, 7)),
+        ):
+            image = np.zeros(shape, dtype=np.uint8)
+            tensor = torch.from_numpy(image)
+            self.assertIs(select_resize_samples(image, target), image)
+            self.assertIs(select_resize_samples(tensor, target), tensor)
+
     def test_large_integer_factors_and_exceptional_neighbours(self):
         for source_hw, target_hw in (
             ((155, 224), (5, 7)),
@@ -196,14 +227,14 @@ class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
                     for packet in packets:
                         self.assertPacketEqual(tensor, packet["image"])
 
-    def test_explicit_backend_takes_precedence_over_legacy_flag(self):
+    def test_explicit_backend_reaches_descriptor(self):
         matcher = tiny_matcher()
         image = np.zeros((13, 17, 3), dtype=np.uint8)
         conf = matcher.resolve_conf(
             dict(describe=True, rgb8_triton=True, rgb8_backend="torch")
         )
         with torch.no_grad(), patch.object(
-            matcher.descriptor, "describe_rgb8", wraps=matcher.descriptor.describe_rgb8
+            matcher.descriptor, "_forward_rgb8", wraps=matcher.descriptor._forward_rgb8
         ) as describe:
             matcher.describe_inputs({"image": image}, {"image": image}, conf)
         self.assertEqual(describe.call_count, 2)

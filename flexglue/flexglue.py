@@ -1,6 +1,7 @@
 """FlexGlue: Sparse-to-Dense Matching and Visual Disambiguation."""
 
 from functools import partial
+from itertools import chain
 from types import MethodType, SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
@@ -47,6 +48,8 @@ class FlexGlue(nn.Module):
         "describe": True,  # build a DINOv3Descriptor for inputs without features
         "describe_mp": None,  # optional resident fp16 descriptor network
         "mmap_weights": False,  # opt in to immutable local CPU checkpoint backing
+        "rgb8_backend": None,  # optional "torch", "torch-compile" or "triton"
+        "rgb8_host_sampling": False,  # opt in to CPU lattice selection
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
         "rgb8_backend": None,  # optional "torch", "torch-compile" or "triton"
         "rgb8_triton": False,  # opt-in direct RGB8 descriptor grid on supported CUDA
@@ -101,6 +104,8 @@ class FlexGlue(nn.Module):
 
             threshold = partial(fused_threshold, native=threshold)
         self.stopping_layers(conf)  # validate before allocating/loading the model
+        if not isinstance(conf.rgb8_host_sampling, bool):
+            raise ValueError("rgb8_host_sampling must be a bool.")
         d, h = conf.descriptor_dim, conf.num_heads
         if type(h) is not int or h <= 0:
             raise ValueError("num_heads must be a positive integer.")
@@ -178,8 +183,8 @@ class FlexGlue(nn.Module):
     ) -> "FlexGlue":
         """Compile the encoder, transformer layers, heads and optional refiners."""
         if self.descriptor is not None:
-            self.descriptor.forward = _compile_method(
-                self.descriptor.forward, mode="default", fullgraph=True
+            self.descriptor.encode = _compile_method(
+                self.descriptor.encode, mode="default", fullgraph=True
             )
         if self.refiner is not None:
             self.refiner.features.forward = _compile_method(
@@ -192,7 +197,7 @@ class FlexGlue(nn.Module):
             block.forward = _compile_method(block.forward, mode=mode, fullgraph=True)
         for head in self.heads:  # queries padded to static_lengths, eager beyond
             head.compiled_forward = _compile_method(
-                head.__call__, mode=mode, fullgraph=True
+                head.forward, mode=mode, fullgraph=True
             )
         self.static_lengths = tuple(sorted(static_lengths))
         return self
@@ -284,13 +289,26 @@ class FlexGlue(nn.Module):
             for im in (image0, image1)
         ]
         if detector is not None:
+            byte_inputs = any(isinstance(d["image"], np.ndarray) for d in data)
+            state = None
+            if byte_inputs and isinstance(detector, nn.Module):
+                state = next(chain(detector.parameters(), detector.buffers()), None)
+            device = state.device if state is not None else "cpu"
+            matcher_device = next(self.parameters()).device if byte_inputs else None
             for data_i in data:
-                feats = [detector.extract(im) for im in data_i["image"]]
+                images = data_i["image"]
+                byte_input = isinstance(images, np.ndarray)
+                if byte_input:
+                    images = pp.numpy_image_to_torch(images)[None].to(device)
+                feats = [detector.extract(im) for im in images]
                 if len({f["keypoints"].shape[1] for f in feats}) > 1:
                     raise ValueError(
                         "Batching needs the same number of keypoints in each image."
                     )
-                data_i.update({k: torch.cat([f[k] for f in feats]) for k in feats[0]})
+                detected = {k: torch.cat([f[k] for f in feats]) for k in feats[0]}
+                if byte_input:
+                    detected = {k: v.to(matcher_device) for k, v in detected.items()}
+                data_i.update(detected)
         return self.match(*data, sparse=sparse, **conf)
 
     def match_dense(
@@ -331,18 +349,19 @@ class FlexGlue(nn.Module):
                     ):
                         # The refiner needs a Torch image; unsupported layouts
                         # retain the existing normalization/resize path.
-                        image = pp.numpy_image_to_torch(image).to(
-                            self.descriptor.mean.device
-                        )
+                        image = self.descriptor.rgb8_to_tensor(image)
                         data_i = {**data_i, "image": image}
                         described = self.descriptor(
                             {"image": image}, resize=conf.describe_resize
                         )
                     else:
-                        described = self.descriptor.describe_rgb8(
-                            image,
+                        described = self.descriptor(
+                            {
+                                "image": image,
+                                "rgb8_backend": conf.rgb8_backend or "triton",
+                                "rgb8_host_sampling": conf.rgb8_host_sampling,
+                            },
                             resize=conf.describe_resize,
-                            backend=conf.rgb8_backend or "triton",
                         )
                 else:
                     described = self.descriptor(
@@ -887,6 +906,8 @@ class FlexGlue(nn.Module):
             raise ValueError(
                 "rgb8_backend must be None, 'torch', 'torch-compile' or 'triton'."
             )
+        if not isinstance(c.rgb8_host_sampling, bool):
+            raise ValueError("rgb8_host_sampling must be a bool.")
         if not 0 <= c.n_layers <= self.conf.n_layers:
             raise ValueError(f"n_layers must be in [0, {self.conf.n_layers}].")
         self.require_heads((c.n_layers,))

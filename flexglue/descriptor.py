@@ -184,7 +184,19 @@ class DINOv3Descriptor(nn.Module):
         return super()._apply(fn, *args, **kwargs)
 
     def forward(self, data: dict, resize: Optional[pp.Resize] = None) -> dict:
-        """Features of data["image"] (Images), descriptors at data["keypoints"]."""
+        """Features of images, with optional byte preparation before tensor work."""
+        if "rgb8_backend" in data and isinstance(data["image"], np.ndarray):
+            return self._forward_rgb8(
+                data["image"],
+                data.get("keypoints"),
+                resize,
+                backend=data["rgb8_backend"],
+                host_sampling=data.get("rgb8_host_sampling", False),
+            )
+        return self._forward(data, resize)
+
+    def _forward(self, data: dict, resize: Optional[pp.Resize] = None) -> dict:
+        """Shared tensor forward, including the compiled descriptor path."""
         x = self.preprocess(data["image"], resize)
         pred = {
             "features": self.encode(x),
@@ -213,6 +225,19 @@ class DINOv3Descriptor(nn.Module):
         resize = self.conf.resize if resize is None else resize
         return pp.resize_images(img, resize, self.edge_divisible_by)
 
+    _stock_preprocess = preprocess
+
+    @property
+    def pixel_dtype(self) -> torch.dtype:
+        """Input precision before resize, matching the normalization buffers."""
+        return self.mean.dtype
+
+    def rgb8_to_tensor(self, image: np.ndarray) -> torch.Tensor:
+        """Normalize byte pixels on the descriptor's device and input precision."""
+        return pp.numpy_image_to_torch(image).to(
+            device=self.mean.device, dtype=self.pixel_dtype
+        )
+
     def describe_rgb8(
         self,
         image: np.ndarray,
@@ -220,12 +245,44 @@ class DINOv3Descriptor(nn.Module):
         resize: Optional[pp.Resize] = None,
         *,
         backend: str = "triton",
+        host_sampling: bool = False,
+    ) -> dict:
+        """Describe HWC byte input through the same public forward dispatch."""
+        data = {
+            "image": image,
+            "rgb8_backend": backend,
+            "rgb8_host_sampling": host_sampling,
+        }
+        if keypoints is not None:
+            data["keypoints"] = keypoints
+        return self.forward(data, resize)
+
+    def sample_descriptors(
+        self, features: torch.Tensor, keypoints: torch.Tensor, image_size: torch.Tensor
+    ) -> torch.Tensor:
+        """L2-normalized layer-0 descriptors (B, N, D) at keypoints in pixels."""
+        kpts_n = ops.normalize_keypoints(keypoints, image_size)
+        descriptors = ops.sample_features(features, kpts_n)
+        descriptors = self.descriptor_head(descriptors)
+        return F.normalize(descriptors, dim=-1)
+
+    def _forward_rgb8(
+        self,
+        image: np.ndarray,
+        keypoints: Optional[torch.Tensor] = None,
+        resize: Optional[pp.Resize] = None,
+        *,
+        backend: str = "triton",
+        host_sampling: bool = False,
     ) -> dict:
         """Describe HWC RGB8 with an optional CUDA preparation backend.
 
         The caller must not mutate image during the blocking upload. Unsupported
         inputs and inference settings use the original Torch preprocessing.
+        Byte input uses the normalization buffers' dtype before resizing.
         """
+        if not isinstance(host_sampling, bool):
+            raise ValueError("host_sampling must be a bool")
         if backend not in ("torch", "torch-compile", "triton"):
             raise ValueError("backend must be 'torch', 'torch-compile' or 'triton'.")
         if (
@@ -237,8 +294,12 @@ class DINOv3Descriptor(nn.Module):
             raise ValueError("describe_rgb8 expects an HWC RGB8 NumPy image")
         resize = self.conf.resize if resize is None else resize
         device = self.mean.device
+        pixel_dtype = self.pixel_dtype
         supported = (
-            type(image) is np.ndarray
+            pixel_dtype == torch.float32
+            and getattr(self.preprocess, "__func__", None)
+            is DINOv3Descriptor._stock_preprocess
+            and type(image) is np.ndarray
             and resize == (512, 512)
             and 1 <= image.shape[0] <= 65535
             and 1 <= image.shape[1] <= 65535
@@ -277,28 +338,20 @@ class DINOv3Descriptor(nn.Module):
                 target_hw=(512, 512),
                 device=device,
                 codebook_device=table,
+                host_sampling=host_sampling,
                 **options,
             )
             return port.describe_prepared(self, prepared, keypoints=keypoints)
         # CPU, gradients, other layouts/platforms/resizes or absent Triton retain
         # the original normalization, interpolation and descriptor forward path.
-        tensor = pp.numpy_image_to_torch(image).to(device)
+        tensor = self.rgb8_to_tensor(image)
         data = {"image": tensor}
         if keypoints is not None:
             data["keypoints"] = keypoints
-        pred = self.forward(data, resize)
+        pred = self._forward(data, resize)
         if keypoints is not None:
             pred["keypoints"] = keypoints
         return pred
-
-    def sample_descriptors(
-        self, features: torch.Tensor, keypoints: torch.Tensor, image_size: torch.Tensor
-    ) -> torch.Tensor:
-        """L2-normalized layer-0 descriptors (B, N, D) at keypoints in pixels."""
-        kpts_n = ops.normalize_keypoints(keypoints, image_size)
-        descriptors = ops.sample_features(features, kpts_n)
-        descriptors = self.descriptor_head(descriptors)
-        return F.normalize(descriptors, dim=-1)
 
     @torch.no_grad()
     def describe(

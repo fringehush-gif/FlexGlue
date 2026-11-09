@@ -94,7 +94,6 @@ def _resize_rgb8(source, table, target_hw, source_is_bgr):
     )
     count = dst_h * dst_w * 3
     # Request FMA contraction explicitly for the qualified interpolation order.
-    # No libdevice FTZ is needed for this bounded normal-value interpolation.
     _kernel()[((count + 255) // 256,)](
         source,
         table,
@@ -109,7 +108,6 @@ def _resize_rgb8(source, table, target_hw, source_is_bgr):
         256,
         num_warps=4,
         enable_fp_fusion=True,
-        enable_reflect_ftz=False,
     )
     return output
 
@@ -120,11 +118,13 @@ def prepare_rgb8(
     target_hw: tuple[int, int] = (512, 512),
     device: Union[torch.device, str] = "cuda",
     codebook_device: Optional[torch.Tensor] = None,
+    host_sampling: bool = False,
 ) -> PreparedDescriptorInput:
     return _prepare_rgb8(
         rgb,
         target_hw=target_hw,
         device=device,
         codebook_device=codebook_device,
+        host_sampling=host_sampling,
         resize=_resize_rgb8,
     )
