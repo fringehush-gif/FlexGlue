@@ -277,6 +277,7 @@ Batching has a few requirements:
 - ```early_stop_decay```: Stop after layer ```k``` if ```covisibility_score < min_covisibility * (1 - early_stop_decay) ** (9 - k)```, lower stops earlier. Default: None (off).
 - ```remove_border_px```: Drop matches this close to the border, in pixels of the resized image (as ```max_distance_px```). Default: 0.0.
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
+- ```rgb8_backend```: Optional RGB8 preparation backend: `"torch"`, `"torch-compile"`, or `"triton"`; default `None`.
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True.
 - ```exact_nn```: With ```gemm_nn```, compute the squared distances from coordinate differences instead of one matrix multiplication: slower but exact, also where float32 matrix multiplications run in TF32. Default: False.
@@ -313,6 +314,15 @@ FlexGlue can be compiled with `torch.compile`, as LightGlue:
 matcher = FlexGlue().eval().cuda().compile(mode="reduce-overhead")
 ```
 The transformer layers and the correspondence heads are compiled into CUDA graphs. Keypoints are padded to the next of `static_lengths` (512, 1024, 2048, 4096 by default), larger inputs fall back to eager mode. The first calls of each new input size are slow while compiling.
+
+For HWC RGB8 NumPy inputs, `rgb8_backend` enables optional CUDA preparation.
+The regular Torch path is used for unsupported settings, training, gradients,
+non-CUDA devices, unavailable Triton, or custom preprocessing. Direct `DINOv3Descriptor.describe_rgb8`
+also accepts a backend selection. The caller must not mutate input bytes during
+the blocking upload. Byte input uses the normalization buffers' dtype before
+resizing. Tensor and RGB8 inputs share encoder compilation; custom preprocessing
+receives the original-resolution tensor through the regular path. Triton is optional for the Triton preparation backend.
+
 
 ## torch.hub
 
