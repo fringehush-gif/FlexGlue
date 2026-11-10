@@ -601,7 +601,9 @@ If you use any ideas from the paper or code from this repo, please consider citi
 correlation without materializing sampled features. This requires Triton; the
 default `"torch"` backend has no extra dependency. Unsupported shapes, layouts,
 dtypes, gradients and externally compiled refinement retain native Torch
-correlation. `FlexGlue.compile()` compiles the matcher, not the refiner.
+correlation. `FlexGlue.compile()` compiles the refiner feature extractor and
+refinement forward as well as the matcher, so its refinement uses native Torch
+correlation. The optional fused correlation is an eager-inference backend.
 Both correlation backends share model parameters and checkpoints.
 
 `FlexGlue(readout_backend="triton")` optionally fuses eager FP32 entmax

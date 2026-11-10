@@ -94,6 +94,22 @@ class SelectedFeaturesTest(unittest.TestCase):
         for s in selected:
             torch.testing.assert_close(selected[s], full[s], rtol=0, atol=0)
 
+    def test_selected_preserves_training_child_under_eval_parent(self):
+        full = tiny().eval()
+        full.layers[9].train()
+        selected = copy.deepcopy(full)
+        self.assertFalse(selected.training)
+        expected = full(self.image)
+        actual = selected(self.image, scales=(1, 2))
+        self.assertEqual(set(actual), {1, 2})
+        for stride in actual:
+            torch.testing.assert_close(actual[stride], expected[stride], rtol=0, atol=0)
+        self.assertEqual(int(selected.layers[9].num_batches_tracked), 1)
+        for key, value in full.state_dict().items():
+            torch.testing.assert_close(
+                value, selected.state_dict()[key], rtol=0, atol=0
+            )
+
     def test_real_subclass_and_instance_extract_overrides(self):
         class CustomRefiner(RoMav2Refiner):
             def extract(self, img, resize=(512, 512)):

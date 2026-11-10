@@ -68,7 +68,11 @@ class VGG19BN(nn.Module):
         requested = (1, 2, 4) if scales is None else tuple(scales)
         if not requested or any(s not in (1, 2, 4) for s in requested):
             raise ValueError("scales must be a nonempty subset of (1, 2, 4)")
-        last = 4 if self.training or scales is None else max(requested)
+        last = (
+            4
+            if scales is None or any(m.training for m in self.modules())
+            else max(requested)
+        )
         x, feats, stride = (image - self.mean) / self.std, {}, 1
         with torch.autocast(image.device.type, torch.bfloat16):
             for layer in self.layers:
