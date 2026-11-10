@@ -723,11 +723,11 @@ class FlexGlue(nn.Module):
         # Selection and threshold checks are discrete; no distance gradients escape.
         dist = dist.detach()
         dist.nan_to_num_(nan=torch.inf, posinf=torch.inf, neginf=torch.inf)
-        m0, m1 = ops.mutual_nn(dist)
+        nearest = ops.mutual_nn(dist, return_distances=not conf.gemm_nn)
+        m0, m1 = nearest[:2]
+        del dist  # Neither branch needs the full distance matrix again.
 
         if conf.gemm_nn:
-            del dist  # Selected-pair distances below do not need the full matrix.
-
             # exact mean distance of the selected pairs only
             def take(t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
                 return t.gather(1, m.clamp(0)[..., None].expand(-1, -1, 2))
@@ -741,7 +741,7 @@ class FlexGlue(nn.Module):
                 + (take(kpts0, m1) - p2d1_i0).norm(dim=-1)
             )
         else:
-            dist0, dist1 = dist.min(2).values, dist.min(1).values
+            dist0, dist1 = nearest[2:]
         # geometric mean of both confidences, as the cycle score
         scores0 = (
             pred["confidence0"] * pred["confidence1"].gather(1, m0.clamp(0))
