@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import torch
+from onnx_test_utils import load_export
 
 
 class EarlyStopExportTest(unittest.TestCase):
@@ -16,13 +17,7 @@ class EarlyStopExportTest(unittest.TestCase):
         for name in ("onnx", "onnxscript"):
             if importlib.util.find_spec(name) is None:
                 raise unittest.SkipTest(f"optional dependency {name} is unavailable")
-        path = Path(__file__).resolve().parents[1] / "onnx" / "export.py"
-        sys.path.insert(0, str(path.parent))
-        cls.addClassCleanup(sys.path.remove, str(path.parent))
-        with patch.object(sys, "path", [str(path.parent), *sys.path]):
-            cls.export = importlib.import_module("export")
-        if Path(cls.export.__file__).resolve() != path:
-            raise ImportError("export module came from another checkout")
+        cls.export = load_export()
 
     def test_early_stop_export_checks_only_required_heads_before_copy(self):
         from flexglue import FlexGlue
