@@ -229,7 +229,7 @@ class SparseMatcherONNX(nn.Module):
         self.matcher = matcher
         self.n_layers = matcher.conf.n_layers
         self.conf = matcher.resolve_conf(
-            {"mp": None, "exact_nn": True, "early_stop_decay": None}
+            {"mp": None, "exact_nn": True, "early_stop_decay": None, "refine": False}
         )
         self.debug_outputs = debug_outputs
         # Cast the transformer layers to float16, including their residual
