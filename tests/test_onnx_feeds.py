@@ -157,7 +157,10 @@ class MatcherFeedTest(unittest.TestCase):
             "match_pair": self.pair,
         }
         with patch.dict(sys.modules, modules):
-            spec.loader.exec_module(check)
+            with patch.object(
+                sys, "path", [str(Path(check.__file__).parent), *sys.path]
+            ):
+                spec.loader.exec_module(check)
 
         class Debug:
             def __init__(self):

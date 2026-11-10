@@ -346,6 +346,8 @@ python onnx/check.py --descriptor onnx/models/flexglue_descriptor.onnx \
 ```
 `onnx/check.py` can check any exported model, e.g. those of the release, against a PyTorch checkpoint (`--weights`).
 The exported matcher has no refinement and uses the fused attention and GELU operators of ONNX Runtime (`--no_fused_attention` exports standard ONNX operators instead).
+The Python `export_matcher()` API requires an uncompiled matcher. Export before calling `FlexGlue.compile()`, or use a separate uncompiled instance loaded with the same weights. Native compiled dispatch and detected Torch-compiled callables used by export are refused before any output file is changed.
+
 By default, it runs all transformer layers. With `--early_stop_layers 2,4,6,8`, it stops early on pairs that are confidently not covisible, as `early_stop_decay` does in PyTorch:
 - After each listed layer `k`, it rejects the pair without running the remaining layers if its covisibility score is below `min_covisibility * (1 - early_stop_decay) ** (n_layers - k)`.
 - The checks are ONNX `If` nodes, and `early_stop_decay` is an additional input of the model. 1 never stops early.
