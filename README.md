@@ -307,7 +307,7 @@ Batching has a few requirements:
 - ```rgb8_host_sampling```: Select resize samples on the host before upload with an RGB8 backend. Default: False.
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```rgb8_triton```: Experimental direct RGB8 preparation for the CUDA descriptor; accepts HWC RGB8 NumPy inputs when enabled. Default: False.
-- ```rgb8_backend```: Optional RGB8 preparation: ```"torch"```, ```"torch-compile"``` or ```"triton"```. Default: ```None``` (use ```rgb8_triton```); an explicit backend overrides that legacy flag.
+- ```rgb8_backend```: RGB8 preparation: ```"torch"``` (eager, default), ```"torch-compile"``` or ```"triton"```. ```None``` retains original Tensor preprocessing. An explicit backend overrides the legacy ```rgb8_triton``` flag.
 - ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True. The GEMM and exact paths select by summed squared endpoint errors; the fallback selects by mean endpoint distance. Both threshold the mean endpoint distance.
 - ```exact_nn```: With ```gemm_nn```, compute the squared distances from coordinate differences instead of one matrix multiplication: slower but exact, also where float32 matrix multiplications run in TF32. Default: False.
 - ```query_chunk_size```: Points per correspondence-head call, bounds memory without changing results. None processes all points at once. Default: 4096.
@@ -367,10 +367,10 @@ with identical descriptors and RNG states. Setting `kde_balance=False` removes
 that balancing step and changes the sampling policy. Frontend parity tests use
 fixed keypoints or explicitly disable balancing to isolate preparation changes.
 
-### Optional RGB8 descriptor preparation
+### RGB8 descriptor preparation
 
-Choose `FlexGlue(rgb8_backend="torch")` for eager Torch preparation without
-importing Triton, or `rgb8_backend="torch-compile"` to compile its conversion and
+Eager Torch preparation is the default (`rgb8_backend="torch"`) and does not
+import Triton. Select `rgb8_backend="torch-compile"` to compile conversion and
 layout operations. Interpolation stays in native Torch to preserve its arithmetic
 order. The compiled option uses Torch's compiler stack (which may require
 Triton), has first-use compilation cost, and can specialize on new image shapes.
@@ -386,15 +386,17 @@ and small integer factors retain the full conversion. This reduces temporary
 memory only on eligible grids; it is not a general speedup over the fused Triton
 kernel. Native Windows CUDA parity remains unmeasured.
 
-For unbatched HWC RGB8 NumPy images, `rgb8_triton=True` can avoid transferring a
-full-resolution float image before building the descriptor grid:
+For unbatched HWC RGB8 NumPy images, both backends upload byte pixels before
+building the descriptor grid. Select `rgb8_backend="triton"` for the optional
+fused kernel; it can reduce preparation intermediates. Measured whole-pipeline
+times are broadly tied. The default needs no custom Triton kernel:
 
 ```python
 import torch
 from flexglue import FlexGlue
 from flexglue.utils.preprocess import read_image
 
-matcher = FlexGlue(rgb8_triton=True).eval().cuda()
+matcher = FlexGlue().eval().cuda()  # eager Torch RGB8 preparation
 rgb0 = read_image("assets/berlin1.jpg")
 rgb1 = read_image("assets/berlin2.jpg")
 with torch.inference_mode():
@@ -405,7 +407,8 @@ with torch.inference_mode():
     cached_matches = matcher.match(packet0, packet1, describe=False)
 ```
 
-The flag is off by default and can also be overridden per match. Existing Torch
+The backend can also be overridden per match. The legacy `rgb8_triton=True`
+selects Triton when no backend is given; an explicit backend takes precedence. Existing Torch
 inputs and feature packets retain their original path. `describe_rgb8` is an
 explicit direct-descriptor API; do not mutate NumPy pixels during upload.
 
@@ -421,7 +424,7 @@ invalidated by module device/dtype transforms.
 
 The Torch backends use the same inference, image-size and resize guards, without
 the Linux-only restriction. CPU, training/grad mode and unsupported input/resize
-settings retain the original Torch path. The default remains off. To disable a
+settings retain the original Torch path. To disable a
 legacy `rgb8_triton=True` per call, pass `rgb8_triton=False` along with
 `rgb8_backend=None`.
 
@@ -487,7 +490,13 @@ matcher = FlexGlue().eval().cuda().compile(mode="reduce-overhead")
 ```
 The transformer layers and the correspondence heads are compiled into CUDA graphs. Keypoints are padded to the next of `static_lengths` (512, 1024, 2048, 4096 by default), larger inputs fall back to eager mode. The first calls of each new input size are slow while compiling.
 
-For HWC RGB8 NumPy inputs, `rgb8_backend` enables optional CUDA preparation.
+For HWC RGB8 NumPy inputs, eager Torch preparation is the default.
+Set `rgb8_backend="torch-compile"` to compile conversion/layout, or
+`rgb8_backend="triton"` for the optional custom fused preparation kernel.
+Eager Torch needs no extra Triton dependency; compiled Torch uses its normal
+compiler dependencies. Triton can reduce preparation intermediates, while
+measured descriptor/matcher pipeline times are broadly tied. Set
+`rgb8_backend=None` to retain the original Tensor preprocessing.
 The regular Torch path is used for unsupported settings, training, gradients,
 non-CUDA devices, unavailable Triton, or custom preprocessing. Direct `DINOv3Descriptor.describe_rgb8`
 also accepts a backend selection. The caller must not mutate input bytes during

@@ -32,6 +32,20 @@ def _compile_method(method, **kwargs):
     return torch.compile(method, **kwargs)
 
 
+def _rgb8_conf(base, overrides):
+    conf = {**base, **overrides}
+    if not isinstance(conf["rgb8_triton"], bool):
+        raise ValueError("rgb8_triton must be a bool.")
+    if "rgb8_backend" in overrides:
+        conf["rgb8_triton"] = False
+    elif "rgb8_triton" in overrides:
+        if conf["rgb8_triton"]:
+            conf["rgb8_backend"] = "triton"
+        elif base["rgb8_triton"]:
+            conf["rgb8_backend"] = "torch"
+    return conf
+
+
 class FlexGlue(nn.Module):
     default_conf = {
         "input_dim": 256,
@@ -51,7 +65,7 @@ class FlexGlue(nn.Module):
         "mmap_weights": False,  # opt in to immutable local CPU checkpoint backing
         "rgb8_host_sampling": False,  # opt in to CPU lattice selection
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
-        "rgb8_backend": None,  # optional "torch", "torch-compile" or "triton"
+        "rgb8_backend": "torch",  # eager default; optional "torch-compile" or "triton"
         "rgb8_triton": False,  # opt-in direct RGB8 descriptor grid on supported CUDA
         "refine": False,  # refine with RoMa v2's dense refiners
         "refine_selected_features": False,  # opt in to skipping unused eval stages
@@ -84,13 +98,11 @@ class FlexGlue(nn.Module):
 
     def __init__(self, **conf) -> None:
         super().__init__()
-        self.conf = conf = SimpleNamespace(**{**self.default_conf, **conf})
+        self.conf = conf = SimpleNamespace(**_rgb8_conf(self.default_conf, conf))
         if conf.describe_mp not in (None, "float16"):
             raise ValueError("describe_mp must be None or 'float16'.")
         if not isinstance(conf.mmap_weights, bool):
             raise ValueError("mmap_weights must be a bool.")
-        if not isinstance(conf.rgb8_triton, bool):
-            raise ValueError("rgb8_triton must be a bool.")
         if conf.rgb8_backend not in (None, "torch", "torch-compile", "triton"):
             raise ValueError(
                 "rgb8_backend must be None, 'torch', 'torch-compile' or 'triton'."
@@ -342,11 +354,10 @@ class FlexGlue(nn.Module):
                         "No features: pass them or build FlexGlue(describe=True)."
                     )
                 image = data_i["image"]
-                if (conf.rgb8_backend is not None or conf.rgb8_triton) and isinstance(
-                    image, np.ndarray
-                ):
+                if isinstance(image, np.ndarray):
                     if (
                         conf.refine
+                        or conf.rgb8_backend is None
                         or image.ndim != 3
                         or image.shape[-1] != 3
                         or image.dtype != np.uint8
@@ -362,7 +373,7 @@ class FlexGlue(nn.Module):
                         described = self.descriptor(
                             {
                                 "image": image,
-                                "rgb8_backend": conf.rgb8_backend or "triton",
+                                "rgb8_backend": conf.rgb8_backend,
                                 "rgb8_host_sampling": conf.rgb8_host_sampling,
                             },
                             resize=conf.describe_resize,
@@ -472,9 +483,7 @@ class FlexGlue(nn.Module):
                 features = data.get("fine_features")
                 if features is None:
                     image = data["image"]
-                    if (
-                        conf.rgb8_backend is not None or conf.rgb8_triton
-                    ) and isinstance(image, np.ndarray):
+                    if isinstance(image, np.ndarray):
                         image = (
                             self.descriptor.rgb8_to_tensor(image)
                             if self.descriptor is not None
@@ -910,9 +919,7 @@ class FlexGlue(nn.Module):
             raise KeyError(f"Unknown conf: {sorted(unknown)}")
         if fixed := conf.keys() & set(self.fixed_conf):
             raise KeyError(f"Fixed at construction: {sorted(fixed)}")
-        c = SimpleNamespace(**{**vars(self.conf), **conf})
-        if not isinstance(c.rgb8_triton, bool):
-            raise ValueError("rgb8_triton must be a bool.")
+        c = SimpleNamespace(**_rgb8_conf(vars(self.conf), conf))
         if c.rgb8_backend not in (None, "torch", "torch-compile", "triton"):
             raise ValueError(
                 "rgb8_backend must be None, 'torch', 'torch-compile' or 'triton'."

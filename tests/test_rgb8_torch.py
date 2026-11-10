@@ -180,7 +180,7 @@ class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
                 rgb8_torch.prepare_rgb8(image, device="cpu")
 
     def test_backend_validation_and_default(self):
-        self.assertIsNone(FlexGlue.default_conf["rgb8_backend"])
+        self.assertEqual(FlexGlue.default_conf["rgb8_backend"], "torch")
         matcher = tiny_matcher()
         for invalid in (False, "auto", "cuda", 1):
             with self.assertRaisesRegex(ValueError, "rgb8_backend"):
@@ -226,6 +226,33 @@ class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
                     )
                     for packet in packets:
                         self.assertPacketEqual(tensor, packet["image"])
+
+    def test_backend_precedence_across_constructor_and_call(self):
+        options = dict(
+            weights=None,
+            describe=False,
+            input_dim=8,
+            descriptor_dim=8,
+            search_dim=4,
+            num_heads=2,
+            n_layers=1,
+            mp=None,
+        )
+        for backend in (None, "torch", "torch-compile", "triton"):
+            with self.subTest(backend=backend):
+                model = FlexGlue(**options, rgb8_triton=True, rgb8_backend=backend)
+                self.assertEqual(model.conf.rgb8_backend, backend)
+                self.assertFalse(model.conf.rgb8_triton)
+                model = FlexGlue(**options, rgb8_triton=True)
+                self.assertEqual(model.conf.rgb8_backend, "triton")
+                conf = model.resolve_conf({"rgb8_backend": backend})
+                self.assertEqual(conf.rgb8_backend, backend)
+                self.assertFalse(conf.rgb8_triton)
+                conf = model.resolve_conf({"rgb8_triton": False})
+                self.assertEqual(conf.rgb8_backend, "torch")
+                model = FlexGlue(**options, rgb8_backend=backend)
+                conf = model.resolve_conf({"rgb8_triton": False})
+                self.assertEqual(conf.rgb8_backend, backend)
 
     def test_explicit_backend_reaches_descriptor(self):
         matcher = tiny_matcher()
