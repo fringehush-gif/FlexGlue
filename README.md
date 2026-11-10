@@ -399,3 +399,9 @@ If you use any ideas from the paper or code from this repo, please consider citi
   year      = {2026}
 }
 ```
+
+### RGB8 preparation benchmark
+
+Run `python benchmarks/benchmark_rgb8.py --help` for selectable Torch and optional
+Triton preparation measurements. The adjacent JSON records retain the source,
+environment and scope of earlier preparation and matching-pipeline measurements.
