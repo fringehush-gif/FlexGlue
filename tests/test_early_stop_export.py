@@ -406,7 +406,26 @@ class EarlyStopExportTest(unittest.TestCase):
             ((0.1, 2), (0.5, 4), (1.0, 5)),
         )
 
-    def check_scheduled_early_stops(self, n_layers, schedule, scores, decays):
+    def test_default_schedule_matches_native_runtime(self):
+        self.check_scheduled_early_stops(
+            3,
+            (2,),
+            {1: 0.001, 2: 0.12, 3: 0.9},
+            ((0.1, 2), (1.0, 3)),
+            native_default=True,
+        )
+
+    def test_explicit_first_layer_matches_native_runtime(self):
+        self.check_scheduled_early_stops(
+            3,
+            (1,),
+            {1: 0.001, 3: 0.9},
+            ((0.1, 1), (1.0, 3)),
+        )
+
+    def check_scheduled_early_stops(
+        self, n_layers, schedule, scores, decays, native_default=False
+    ):
         if importlib.util.find_spec("onnxruntime") is None:
             self.skipTest("optional dependency onnxruntime is unavailable")
         import onnx
@@ -478,7 +497,7 @@ class EarlyStopExportTest(unittest.TestCase):
 
             # Rename the score consistently throughout all graph scopes, so the
             # model remains valid but this stop predicate cannot be identified.
-            old, new = "covisibility_score_layer4", "anonymous_stop_score"
+            old, new = f"covisibility_score_layer{schedule[-1]}", "anonymous_stop_score"
             replacements = 0
             for graph in graphs:
                 for node in graph.node:
@@ -526,7 +545,7 @@ class EarlyStopExportTest(unittest.TestCase):
                             filter_threshold=0.0,
                             max_distance_px=float("inf"),
                             min_covisibility=0.5,
-                            early_stop_layers=schedule,
+                            early_stop_layers=None if native_default else schedule,
                             early_stop_decay=None if decay == 1 else decay,
                         )
                         feed = {
