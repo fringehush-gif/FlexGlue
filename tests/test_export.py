@@ -1,9 +1,9 @@
 import importlib.util
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import torch
+from onnx_test_utils import load_export
 from torch import nn
 
 from flexglue.utils import modules
@@ -22,10 +22,7 @@ class ExportIsolationTest(unittest.TestCase):
         for name in ("onnx", "onnxscript"):
             if importlib.util.find_spec(name) is None:
                 raise unittest.SkipTest(f"optional dependency {name} is unavailable")
-        path = Path(__file__).resolve().parents[1] / "onnx" / "export.py"
-        spec = importlib.util.spec_from_file_location("flexglue_export_test", path)
-        cls.export = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.export)
+        cls.export = load_export()
 
     def test_fused_context_is_local_and_native_backward_works(self):
         export_model, native = TinyMatcher(), TinyMatcher()
