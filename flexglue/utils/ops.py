@@ -298,6 +298,14 @@ def lattice_kde(
         raise ValueError("std exceeds the finite float32 kernel range.")
     u = ((points.float() + 1) / pitch).clamp(0, size - 1 - 1e-4)
     base, frac = u.floor().long(), u.frac()
+    # Below this precision bound, the existing upper margin stays representable.
+    if (size - 1) * precision.eps >= 1e-4:
+        # Float32 can round to the final cell: keep its mass at the upper corner.
+        if size >= 2**63 - 2**39:
+            # A rounded 2**63 cannot be represented by the int64 conversion.
+            base = torch.where(u >= float(2**63), size - 1, base)
+        frac = torch.where(base >= size - 1, 1.0, frac)
+        base = base.clamp(max=size - 2)
     corners = torch.cartesian_prod(
         *[torch.arange(2, device=points.device)] * d
     ).reshape(-1, d)
@@ -308,8 +316,10 @@ def lattice_kde(
     tent = torch.where(corners.bool(), frac[:, :, None], 1 - frac[:, :, None]).prod(-1)
     lattice = u.new_zeros(b, size**d)
     lattice.scatter_add_(1, idx, (tent * weights[..., None].float()).flatten(1))
+    # Coordinate construction buffers are no longer needed during the blur.
+    del u, base, frac, point_idx, corner_idx, corners, strides
     # splat and read tents add pitch^2 / 6 each
-    k = torch.arange(-r, r + 1, device=points.device, dtype=u.dtype) * pitch
+    k = torch.arange(-r, r + 1, device=points.device, dtype=lattice.dtype) * pitch
     kernel = (std / s * torch.exp(-(k**2) / (2 * s**2))).view(1, 1, -1)
     lattice = lattice.view(b, *[size] * d)
     for dim in range(1, d + 1):
