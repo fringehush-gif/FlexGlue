@@ -54,11 +54,41 @@ class EarlyStopScheduleTest(unittest.TestCase):
             context = self.model.decode_pair(*self.data, conf)
         return context, score_calls, list(self.calls)
 
-    def test_none_uses_all_intermediate_checks(self):
-        context, checks, blocks = self.decode({2: [0.01, 0.01]})
+    def test_default_skips_first_layer(self):
+        context, checks, blocks = self.decode({1: [0.0, 0.0], 2: [0.01, 0.01]})
         self.assertEqual(context.layer, 2)
-        self.assertEqual(checks, [1, 2])
+        self.assertEqual(checks, [2])
         self.assertEqual(blocks, [1, 2])
+
+    def test_default_at_reduced_depths(self):
+        for depth, expected in ((0, 0), (1, 1), (2, 2), (3, 2), (5, 2)):
+            with self.subTest(depth=depth):
+                context, checks, blocks = self.decode(
+                    {1: [0.0, 0.0], 2: [0.0, 0.0]}, n_layers=depth
+                )
+                self.assertEqual(context.layer, expected)
+                self.assertEqual(checks, [expected])
+                self.assertEqual(blocks, list(range(1, expected + 1)))
+
+    def test_nine_layer_default_checks_only_intermediate_layers_from_two(self):
+        self.model.conf.n_layers = 9
+        self.model.loaded_heads = set(range(10))
+        for depth in (0, 1, 2, 3, 9):
+            with self.subTest(depth=depth):
+                conf = self.model.resolve_conf({"n_layers": depth})
+                self.assertEqual(conf.early_stop_layers, tuple(range(2, depth)))
+
+    def test_first_layer_remains_an_explicit_schedule(self):
+        context, checks, blocks = self.decode({1: [0.0, 0.0]}, early_stop_layers=(1,))
+        self.assertEqual(context.layer, 1)
+        self.assertEqual(checks, [1])
+        self.assertEqual(blocks, [1])
+
+    def test_nan_score_does_not_stop(self):
+        context, checks, blocks = self.decode({2: [float("nan"), 0.0], 4: [0.0, 0.0]})
+        self.assertEqual(context.layer, 4)
+        self.assertEqual(checks, [2, 3, 4])
+        self.assertEqual(blocks, [1, 2, 3, 4])
 
     def test_explicit_schedule_and_empty(self):
         context, checks, blocks = self.decode(
