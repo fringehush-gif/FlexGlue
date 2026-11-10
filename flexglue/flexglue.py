@@ -400,9 +400,16 @@ class FlexGlue(nn.Module):
             for data in (data0, data1):
                 features = data.get("fine_features")
                 if features is None:
-                    features = self.refiner.extract(
-                        data["image"], resize=conf.refine_resize
-                    )
+                    image = data["image"]
+                    if conf.rgb8_backend is not None and isinstance(image, np.ndarray):
+                        # Cached descriptors can leave byte images unconsumed.
+                        # Normalize only when refinement actually needs pixels.
+                        image = (
+                            self.descriptor.rgb8_to_tensor(image)
+                            if self.descriptor is not None
+                            else pp.numpy_image_to_torch(image).to(f0.device)
+                        )
+                    features = self.refiner.extract(image, resize=conf.refine_resize)
                 fine.append(features)
             context = context._replace(fine=tuple(fine))
         return context
