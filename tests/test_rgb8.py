@@ -352,15 +352,43 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
             self.descriptor._apply(fail)
         self.assertIsNone(self.descriptor._rgb8_codebook)
 
-    def test_default_off_and_backend_validation(self):
-        self.assertIsNone(FlexGlue.default_conf["rgb8_backend"])
+    def test_default_torch_and_backend_validation(self):
+        self.assertEqual(FlexGlue.default_conf["rgb8_backend"], "torch")
         matcher = tiny_matcher()
-        self.assertIsNone(matcher.conf.rgb8_backend)
+        self.assertEqual(matcher.conf.rgb8_backend, "torch")
         for value in (True, 1, "unknown"):
             with self.subTest(value=value), self.assertRaisesRegex(
                 ValueError, "rgb8_backend"
             ):
                 matcher.resolve_conf({"rgb8_backend": value})
+
+    def test_default_rgb8_is_eager_torch_without_triton(self):
+        matcher = tiny_matcher()
+        conf = matcher.resolve_conf({"describe": True})
+        for backend in (None, "torch-compile", "triton"):
+            self.assertEqual(
+                matcher.resolve_conf({"rgb8_backend": backend}).rgb8_backend, backend
+            )
+        with forbid_triton(), patch.object(
+            self.descriptor, "_forward_rgb8", wraps=self.descriptor._forward_rgb8
+        ) as direct, patch.object(torch, "compile") as compile_model, torch.no_grad():
+            self.descriptor.describe_rgb8(self.image)
+            self.assertEqual(direct.call_args.kwargs["backend"], "torch")
+            with patch.object(
+                matcher.descriptor,
+                "_forward_rgb8",
+                wraps=matcher.descriptor._forward_rgb8,
+            ) as selected:
+                matcher.describe_inputs(
+                    {"image": self.image},
+                    {
+                        "features": torch.ones(1, 8, 4, 4),
+                        "image_size": torch.ones(1, 2),
+                    },
+                    conf,
+                )
+                self.assertEqual(selected.call_args.kwargs["backend"], "torch")
+            compile_model.assert_not_called()
 
     def test_matcher_byte_inputs_keep_descriptor_module_hooks(self):
         matcher = tiny_matcher()
@@ -424,7 +452,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
             self.assertIs(packet["image"], image)
             self.assertEqual(packet["keypoints"].shape, (1, 1, 2))
 
-    def test_actual_cpu_match_optin_matches_torch_and_feature_packets(self):
+    def test_actual_cpu_match_backends_match_torch_and_feature_packets(self):
         matcher = tiny_matcher()
         images = [self.image, self.image[:, :, ::-1]]
         tensors = [numpy_image_to_torch(image) for image in images]
@@ -449,6 +477,12 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
             self.assertEqual(len(reference), 16)
             self.assertPacketEqual(reference, actual)
             self.assertTrue(torch.equal(rng, actual_rng))
+            for flags in ({}, {"rgb8_backend": None}):
+                default, default_rng = run(
+                    [{"image": image} for image in images], **flags
+                )
+                self.assertPacketEqual(reference, default)
+                self.assertTrue(torch.equal(rng, default_rng))
             packets = [
                 matcher.descriptor({"image": tensor}, resize=(32, 32))
                 for tensor in tensors
@@ -511,7 +545,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
                 (False, True),
                 (True, True),
             ):
-                for backend in ("torch", "torch-compile", "triton"):
+                for backend in (None, "torch", "torch-compile", "triton"):
                     with self.subTest(
                         descriptor=descriptor_present, fine=fine_cache, backend=backend
                     ), torch.no_grad():
@@ -637,7 +671,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 with patch.object(
                     rgb8_triton, "prepare_rgb8", wraps=rgb8_triton.prepare_rgb8
                 ) as prepare:
-                    actual = self.descriptor.describe_rgb8(rgb)
+                    actual = self.descriptor.describe_rgb8(rgb, backend="triton")
                 if dtype == torch.float32:
                     prepare.assert_called_once()
                 else:
@@ -781,7 +815,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
             with patch.object(
                 rgb8_triton, "prepare_rgb8", wraps=rgb8_triton.prepare_rgb8
             ) as prepare:
-                descriptor.describe_rgb8(rgb)
+                descriptor.describe_rgb8(rgb, backend="triton")
             prepare.assert_called_once()
             # Both routes must enter the shared compiled tensor forward.
             self.assertTrue(tensor_compiled)
@@ -816,7 +850,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
             image = numpy_image_to_torch(rgb).cuda()
             expected = self.descriptor({"image": image, "keypoints": keypoints})
             expected["keypoints"] = keypoints
-            actual = self.descriptor.describe_rgb8(rgb, keypoints)
+            actual = self.descriptor.describe_rgb8(rgb, keypoints, backend="triton")
             prepare.assert_called_once()
             self.assertPacketEqual(expected, actual)
 
@@ -835,7 +869,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
             ):
                 image = numpy_image_to_torch(rgb).cuda()
                 expected = descriptor({"image": image})
-                actual = descriptor.describe_rgb8(rgb)
+                actual = descriptor.describe_rgb8(rgb, backend="triton")
                 self.assertPacketEqual(expected, actual)
                 self.assertIsNone(descriptor._rgb8_codebook)
         finally:

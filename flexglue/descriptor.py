@@ -193,7 +193,7 @@ class DINOv3Descriptor(nn.Module):
         keypoints: Optional[torch.Tensor] = None,
         resize: Optional[pp.Resize] = None,
         *,
-        backend: str = "triton",
+        backend: str = "torch",
         host_sampling: bool = False,
     ) -> dict:
         """Describe HWC byte input through the same public forward dispatch."""
@@ -212,7 +212,7 @@ class DINOv3Descriptor(nn.Module):
         keypoints: Optional[torch.Tensor] = None,
         resize: Optional[pp.Resize] = None,
         *,
-        backend: str = "triton",
+        backend: str = "torch",
         host_sampling: bool = False,
     ) -> dict:
         """Describe HWC RGB8 with an optional CUDA preparation backend.

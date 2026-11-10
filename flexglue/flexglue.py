@@ -44,7 +44,7 @@ class FlexGlue(nn.Module):
         "remove_border_px": 0.0,  # border margin, pixels of the descriptor input
         "mp": "float16",  # transformer dtype: float16, bfloat16 or None (fp32)
         "describe": True,  # build a DINOv3Descriptor for inputs without features
-        "rgb8_backend": None,  # optional "torch", "torch-compile" or "triton"
+        "rgb8_backend": "torch",  # eager default; optional "torch-compile" or "triton"
         "rgb8_host_sampling": False,  # opt in to CPU lattice selection
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
         "refine": False,  # refine with RoMa v2's dense refiners
@@ -263,9 +263,10 @@ class FlexGlue(nn.Module):
                         "No features: pass them or build FlexGlue(describe=True)."
                     )
                 image = data_i["image"]
-                if conf.rgb8_backend is not None and isinstance(image, np.ndarray):
+                if isinstance(image, np.ndarray):
                     if (
                         conf.refine
+                        or conf.rgb8_backend is None
                         or image.ndim != 3
                         or image.shape[-1] != 3
                         or image.dtype != np.uint8
@@ -401,7 +402,7 @@ class FlexGlue(nn.Module):
                 features = data.get("fine_features")
                 if features is None:
                     image = data["image"]
-                    if conf.rgb8_backend is not None and isinstance(image, np.ndarray):
+                    if isinstance(image, np.ndarray):
                         # Cached descriptors can leave byte images unconsumed.
                         # Normalize only when refinement actually needs pixels.
                         image = (

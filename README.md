@@ -277,7 +277,7 @@ Batching has a few requirements:
 - ```early_stop_decay```: Stop after layer ```k``` if ```covisibility_score < min_covisibility * (1 - early_stop_decay) ** (9 - k)```, lower stops earlier. Default: None (off).
 - ```remove_border_px```: Drop matches this close to the border, in pixels of the resized image (as ```max_distance_px```). Default: 0.0.
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
-- ```rgb8_backend```: Optional RGB8 preparation backend: `"torch"`, `"torch-compile"`, or `"triton"`; default `None`.
+- ```rgb8_backend```: RGB8 preparation backend: `"torch"` (eager, default), `"torch-compile"`, or `"triton"`. `None` retains the original Tensor preprocessing.
 - ```rgb8_host_sampling```: Select resize samples on the host before upload with an RGB8 backend. Default: False.
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True.
@@ -316,7 +316,13 @@ matcher = FlexGlue().eval().cuda().compile(mode="reduce-overhead")
 ```
 The transformer layers and the correspondence heads are compiled into CUDA graphs. Keypoints are padded to the next of `static_lengths` (512, 1024, 2048, 4096 by default), larger inputs fall back to eager mode. The first calls of each new input size are slow while compiling.
 
-For HWC RGB8 NumPy inputs, `rgb8_backend` enables optional CUDA preparation.
+For HWC RGB8 NumPy inputs, eager Torch preparation is the default.
+Set `rgb8_backend="torch-compile"` to compile conversion/layout, or
+`rgb8_backend="triton"` for the optional custom fused preparation kernel.
+Eager Torch needs no extra Triton dependency; compiled Torch uses its normal
+compiler dependencies. Triton can reduce preparation intermediates, while
+measured descriptor/matcher pipeline times are broadly tied. Set
+`rgb8_backend=None` to retain the original Tensor preprocessing.
 The regular Torch path is used for unsupported settings, training, gradients,
 non-CUDA devices, unavailable Triton, or custom preprocessing. Direct `DINOv3Descriptor.describe_rgb8`
 also accepts a backend selection. The caller must not mutate input bytes during

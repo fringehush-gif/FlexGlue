@@ -180,7 +180,7 @@ class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
                 rgb8_torch.prepare_rgb8(image, device="cpu")
 
     def test_backend_validation_and_default(self):
-        self.assertIsNone(FlexGlue.default_conf["rgb8_backend"])
+        self.assertEqual(FlexGlue.default_conf["rgb8_backend"], "torch")
         matcher = tiny_matcher()
         for invalid in (False, "auto", "cuda", 1):
             with self.assertRaisesRegex(ValueError, "rgb8_backend"):
