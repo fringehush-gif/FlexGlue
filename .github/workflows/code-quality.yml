@@ -36,5 +36,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
-      - run: python -m pip install numpy opencv-python-headless
-      - run: python -m unittest discover -s tests -v
+      - run: python -m pip install numpy opencv-python-headless onnx==1.23.2 onnxscript==0.7.2 onnxruntime==1.31.1
+      - name: Run maintained CPU contracts
+        if: ${{ hashFiles('tests/test_*.py') != '' }}
+        run: python -m unittest discover -s tests -v
