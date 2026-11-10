@@ -491,6 +491,65 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
             self.assertIsInstance(packet["image"], torch.Tensor)
             self.assertPacketEqual(packet["image"], numpy_image_to_torch(self.image))
 
+    def test_cached_rgb8_refinement_normalizes_only_consumed_images(self):
+        from flexglue.utils.preprocess import resize_images
+
+        class Extractor(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            def extract(self, image, resize):
+                self.calls.append(image)
+                return {1: resize_images(image, resize)}
+
+        for descriptor_present in (True, False):
+            matcher = tiny_matcher()
+            if not descriptor_present:
+                matcher.descriptor = None
+            matcher.refiner = Extractor()
+            expected = resize_images(numpy_image_to_torch(self.image), (32, 32))
+            cached_fine = {1: expected}
+            for fine_cache in (
+                (False, False),
+                (True, False),
+                (False, True),
+                (True, True),
+            ):
+                for backend in ("torch", "torch-compile", "triton"):
+                    with self.subTest(
+                        descriptor=descriptor_present, fine=fine_cache, backend=backend
+                    ), torch.no_grad():
+                        matcher.refiner.calls.clear()
+                        packets = [
+                            {
+                                "features": torch.ones(1, 8, 4, 4),
+                                "image_size": torch.tensor([[17.0, 13.0]]),
+                                "image": self.image,
+                                **({"fine_features": cached_fine} if cached else {}),
+                            }
+                            for cached in fine_cache
+                        ]
+                        conf = matcher.resolve_conf(
+                            dict(
+                                describe=False,
+                                refine=True,
+                                refine_resize=(32, 32),
+                                rgb8_backend=backend,
+                                early_stop_decay=None,
+                            )
+                        )
+                        described = matcher.describe_inputs(*packets, conf)
+                        context = matcher.decode_pair(*described, conf)
+                        self.assertEqual(
+                            len(matcher.refiner.calls), 2 - sum(fine_cache)
+                        )
+                        for i, cached in enumerate(fine_cache):
+                            self.assertIs(packets[i]["image"], self.image)
+                            self.assertPacketEqual(context.fine[i][1], expected)
+                            if cached:
+                                self.assertIs(context.fine[i], cached_fine)
+
 
 @unittest.skipUnless(
     os.environ.get("FLEXGLUE_TEST_RGB8_CUDA") == "1",

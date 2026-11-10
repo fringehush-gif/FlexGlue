@@ -471,12 +471,21 @@ class FlexGlue(nn.Module):
             for data in (data0, data1):
                 features = data.get("fine_features")
                 if features is None:
+                    image = data["image"]
+                    if (
+                        conf.rgb8_backend is not None or conf.rgb8_triton
+                    ) and isinstance(image, np.ndarray):
+                        image = (
+                            self.descriptor.rgb8_to_tensor(image)
+                            if self.descriptor is not None
+                            else pp.numpy_image_to_torch(image).to(f0.device)
+                        )
                     extract = (
                         self.refiner.extract_selected
                         if conf.refine_selected_features
                         else self.refiner.extract
                     )
-                    features = extract(data["image"], resize=conf.refine_resize)
+                    features = extract(image, resize=conf.refine_resize)
                 fine.append(features)
             context = context._replace(fine=tuple(fine))
         return context
