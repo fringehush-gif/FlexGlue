@@ -1,7 +1,9 @@
 """Actual public non-GEMM matcher export, including dynamic runtime execution."""
 import importlib.util
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import torch
@@ -43,7 +45,9 @@ class NonGemmMatcherExportTest(unittest.TestCase):
             with self.subTest(fused=fused), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "matcher.onnx"
                 with torch.inference_mode():
-                    self.export.export_matcher(model, path, size, 18, fused=fused)
+                    # Export diagnostics may contain Unicode on ASCII-only consoles.
+                    with redirect_stdout(io.StringIO()):
+                        self.export.export_matcher(model, path, size, 18, fused=fused)
                     session = ort.InferenceSession(
                         str(path), providers=["CPUExecutionProvider"]
                     )
