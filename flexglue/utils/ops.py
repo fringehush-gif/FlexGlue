@@ -93,6 +93,8 @@ def entmax15_window_readout(
     hw,
     radius: int = 1,
     k: int = 512,
+    *,
+    threshold=sorted_entmax15_threshold,
 ) -> tuple:
     """1.5-entmax expected position (B, N, 2) and mass (B, N) around the argmax."""
     low_precision = logits.dtype in (torch.float16, torch.bfloat16)
@@ -101,7 +103,7 @@ def entmax15_window_readout(
         vmax, idx = topv[..., :1], topi[..., :1]
         values = topv.float() if low_precision else topv
         max_value = vmax.float() if low_precision else vmax
-        tau = sorted_entmax15_threshold((values - max_value) / 2)
+        tau = threshold((values - max_value) / 2)
     else:
         vmax, idx = logits.max(-1, keepdim=True)
         values = logits.float() if low_precision else logits
