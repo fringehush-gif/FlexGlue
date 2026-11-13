@@ -6,6 +6,7 @@ Adapted from the official implementation and weights:
     Viktor Larsson, Anders Heyden, Fredrik Kahl, Mårten Wadenbäck, Michael Felsberg
     ECCV 2026, https://arxiv.org/abs/2511.15706
     Code: https://github.com/Parskatt/RoMaV2 (MIT License)
+    Copyright (c) 2025 Johan Edstedt
 """
 
 from typing import Dict, Optional, Tuple
@@ -58,13 +59,25 @@ class VGG19BN(nn.Module):
         self.register_buffer("mean", mean[:, None, None], persistent=False)
         self.register_buffer("std", std[:, None, None], persistent=False)
 
-    def forward(self, image: torch.Tensor) -> Dict[int, torch.Tensor]:
+    def forward(
+        self, image: torch.Tensor, scales: Optional[Tuple[int, ...]] = None
+    ) -> Dict[int, torch.Tensor]:
+        # None preserves the full operation, including hooks and BN updates.
+        requested = (1, 2, 4) if scales is None else tuple(scales)
+        if not requested or any(s not in (1, 2, 4) for s in requested):
+            raise ValueError("scales must be a nonempty subset of (1, 2, 4)")
+        last = (
+            4
+            if scales is None or any(m.training for m in self.modules())
+            else max(requested)
+        )
         x, feats, stride = (image - self.mean) / self.std, {}, 1
         with torch.autocast(image.device.type, torch.bfloat16):
             for layer in self.layers:
                 if isinstance(layer, nn.MaxPool2d):
-                    feats[stride] = ops.to_hwc(x)
-                    if stride == 4:
+                    if stride in requested:
+                        feats[stride] = ops.to_hwc(x)
+                    if stride == last:
                         break
                     stride *= 2
                 x = layer(x)
@@ -116,6 +129,12 @@ class ConvRefiner(nn.Module):
         scale_factor: Tuple[float, float],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         h, w = f_i.shape[1:3]
+        if f_j.shape[1:3] != (h, w):
+            raise ValueError(
+                "RoMa refinement requires matching feature sizes. "
+                "Use a fixed (height, width) refine_resize for image extraction, "
+                "or rebuild supplied fine_features on matching grids."
+            )
         f_i, f_j = self.proj(f_i.float()), self.proj(f_j.float())
         f_ji = F.grid_sample(ops.to_chw(f_j), warp, align_corners=False)
         grid = ops.cell_centers(h, w, scale=(w, h), device=warp.device)
@@ -174,6 +193,25 @@ class RoMav2Refiner(nn.Module):
     ) -> Dict[int, torch.Tensor]:
         """Fine features of images resized with resize_images, keyed by stride."""
         return self.features(pp.resize_images(img, resize))
+
+    _stock_extract = extract
+
+    def extract_selected(
+        self, img: pp.Images, resize: pp.Resize = (512, 512)
+    ) -> Dict[int, torch.Tensor]:
+        """Extract stages needed by this refiner; stride 1 supplies image size.
+
+        This explicit operation may skip later layer hooks in evaluation. In
+        training it executes every stage to retain BatchNorm updates. A custom
+        extract override is run in full before selecting the required keys.
+        Selected caches may not contain keys needed by other scale settings.
+        """
+        scales = (1, *self.scales)
+        extract = self.extract
+        if getattr(extract, "__func__", None) is not RoMav2Refiner._stock_extract:
+            features = extract(img, resize=resize)
+            return {s: features[s] for s in scales}
+        return self.features(pp.resize_images(img, resize), scales=scales)
 
     def forward(
         self,
