@@ -29,6 +29,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       ORT_DISABLE_TELEMETRY: '1'
+      PYTHONIOENCODING: 'utf-8'
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
