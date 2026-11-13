@@ -546,7 +546,15 @@ def sha256sum(path: Path) -> str:
     return h.hexdigest()
 
 
+def _reject_compiled(callable_, description):
+    # torch.compile marks its callable; functools-wrapped compiled callables
+    # retain this marker too. Do not unwrap or replace user-defined forwards.
+    if hasattr(callable_, "_torchdynamo_orig_callable"):
+        raise ValueError(f"Export requires an uncompiled {description}.")
+
+
 def export_descriptor(descriptor, path: Path, size, opset: int):
+    _reject_compiled(descriptor.encode, "descriptor encode method")
     model = DescriptorONNX(descriptor).eval()
     image = torch.rand(1, 3, *size)
     torch.onnx.export(
@@ -633,6 +641,12 @@ def export_matcher(
     early_stop_layers=None,
 ):
     """Export a copy of the matcher (the export modifies it in place)."""
+    if matcher.static_lengths is not None:
+        raise ValueError(
+            "Export requires an uncompiled matcher; export before calling compile()."
+        )
+    for block in matcher.transformers[: matcher.conf.n_layers]:
+        _reject_compiled(block.forward, "matcher transformer")
     matcher = copy.deepcopy(matcher)
     output_names = MATCHER_OUTPUTS + (DEBUG_OUTPUTS if debug_outputs else [])
     if early_stop_layers:
