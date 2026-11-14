@@ -29,7 +29,7 @@ def reference(source, table, target_hw, bgr):
         image = F.interpolate(
             image, size=target_hw, mode="bilinear", align_corners=False
         )
-    return image
+    return image.contiguous()
 
 
 def tables(device):
@@ -152,6 +152,31 @@ class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
         with patch("torch.compile", side_effect=RuntimeError("compiler unavailable")):
             with self.assertRaisesRegex(RuntimeError, "compiler unavailable"):
                 rgb8_torch._compiled_converter()
+
+    def test_degenerate_source_resize_keeps_nchw_contiguous(self):
+        table = torch.from_numpy(fp32_codebook())
+        for source_hw in ((1, 1), (1, 5), (5, 1), (3, 5)):
+            image = np.arange(np.prod(source_hw) * 3, dtype=np.uint8).reshape(
+                *source_hw, 3
+            )
+            for target_hw in ((7, 11), (512, 512)):
+                for bgr in (False, True):
+                    with self.subTest(
+                        source_hw=source_hw, target_hw=target_hw, bgr=bgr
+                    ):
+                        source = torch.from_numpy(image.copy())
+                        actual = rgb8_torch._resize_rgb8(source, table, target_hw, bgr)
+                        rgb = image[..., ::-1].copy() if bgr else image
+                        expected = F.interpolate(
+                            numpy_image_to_torch(rgb)[None].contiguous(),
+                            size=target_hw,
+                            mode="bilinear",
+                            align_corners=False,
+                        )
+                        self.assertEqual(tuple(actual.shape), (1, 3, *target_hw))
+                        self.assertEqual(actual.dtype, torch.float32)
+                        self.assertTrue(torch.equal(actual, expected))
+                        self.assertTrue(actual.is_contiguous())
 
     def test_upload_layouts_retain_pixels(self):
         rgb = np.arange(9 * 13 * 3, dtype=np.uint8).reshape(9, 13, 3)

@@ -41,7 +41,7 @@ def _resize_rgb8(source, table, target_hw, source_is_bgr, compile_conversion=Fal
         image = F.interpolate(
             image, size=target_hw, mode="bilinear", align_corners=False
         )
-    return image
+    return image.contiguous()
 
 
 def prepare_rgb8(
