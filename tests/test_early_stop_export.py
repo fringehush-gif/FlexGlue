@@ -46,9 +46,7 @@ class EarlyStopExportTest(unittest.TestCase):
             "export",
             side_effect=lambda *args, **kwargs: Path(args[2]).write_bytes(b"graph"),
         ) as write, patch.object(
-            export, "finalize_matcher_graph"
-        ), patch.object(
-            export, "add_early_stopping"
+            export, "_postprocess_matcher_graph"
         ):
             export.export_matcher(model, path, (32, 32), 18, early_stop_layers=(2, 4))
             self.assertIsInstance(
@@ -135,9 +133,15 @@ class EarlyStopExportTest(unittest.TestCase):
                         ), patch.object(
                             torch.onnx, "export", side_effect=write
                         ), patch.object(
-                            export, "finalize_matcher_graph", side_effect=rewrite
+                            export.onnx, "load", return_value=object()
                         ), patch.object(
-                            export, "add_early_stopping", side_effect=branch
+                            export.onnx, "save"
+                        ), patch.object(
+                            export.onnx.checker, "check_model"
+                        ), patch.object(
+                            export, "_finalize_matcher_model", side_effect=rewrite
+                        ), patch.object(
+                            export, "_add_early_stopping_model", side_effect=branch
                         ), patch.object(
                             Path, "replace", new=replace
                         ):
@@ -193,7 +197,7 @@ class EarlyStopExportTest(unittest.TestCase):
                     ), patch.object(
                         torch.onnx, "export", side_effect=write
                     ), patch.object(
-                        export, "finalize_matcher_graph", side_effect=rewrite
+                        export, "_postprocess_matcher_graph", side_effect=rewrite
                     ):
                         export.export_matcher(model, destination, (32, 32), 18)
                     self.assertEqual(destination.read_bytes(), b"graph-rewritten")
@@ -237,7 +241,7 @@ class EarlyStopExportTest(unittest.TestCase):
                     ), patch.object(
                         torch.onnx, "export", side_effect=write
                     ), patch.object(
-                        export, "finalize_matcher_graph"
+                        export, "_postprocess_matcher_graph"
                     ):
                         export.export_matcher(model, destination, (32, 32), 18)
                     self.assertEqual(target.read_bytes(), b"complete")

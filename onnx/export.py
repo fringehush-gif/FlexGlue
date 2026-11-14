@@ -558,7 +558,7 @@ def read_early_stop_layers(graphs, n_layers=9):
     return sorted(layers)
 
 
-def add_early_stopping(path: Path, check_layers, n_layers: int):
+def _add_early_stopping_model(model, check_layers, n_layers: int):
     """Turn the graph of LayerScoresMatcherONNX into nested If nodes.
 
     After each layer k in check_layers, the pair is rejected without running
@@ -572,7 +572,6 @@ def add_early_stopping(path: Path, check_layers, n_layers: int):
     min_covisibility = 0). When stopping early, matches0 is -1, mscores0 is 0
     and covisibility_score is the score of the last layer run.
     """
-    model = onnx.load(str(path))
     graph = model.graph
     nodes = list(graph.node)
     score_names = [f"covisibility_score_layer{k}" for k in check_layers]
@@ -616,6 +615,12 @@ def add_early_stopping(path: Path, check_layers, n_layers: int):
         helper.make_tensor_value_info("early_stop_decay", TensorProto.FLOAT, [])
     )
     del graph.value_info[:]
+
+
+def add_early_stopping(path: Path, check_layers, n_layers: int):
+    """Add early stopping to an existing ONNX file."""
+    model = onnx.load(str(path))
+    _add_early_stopping_model(model, check_layers, n_layers)
     onnx.checker.check_model(model)
     onnx.save(model, str(path))
 
@@ -693,7 +698,7 @@ KEYPOINT_DIMS = {
 }
 
 
-def finalize_matcher_graph(path: Path, n_layers: int, stride: int):
+def _finalize_matcher_model(model, n_layers: int, stride: int):
     """Record the matcher contract and remove specialized keypoint shapes.
 
     The exporter may annotate intermediate values (value_info) and outputs with
@@ -702,7 +707,6 @@ def finalize_matcher_graph(path: Path, n_layers: int, stride: int):
     with static reshapes), which then fail for other numbers of keypoints.
     Clear the intermediate annotations and name the dynamic dimensions.
     """
-    model = onnx.load(str(path))
     metadata = {entry.key: entry.value for entry in model.metadata_props}
     metadata.update(
         {"flexglue.n_layers": str(n_layers), "flexglue.stride": str(stride)}
@@ -714,6 +718,21 @@ def finalize_matcher_graph(path: Path, n_layers: int, stride: int):
             dim = value.type.tensor_type.shape.dim[1]
             dim.Clear()
             dim.dim_param = KEYPOINT_DIMS[value.name]
+
+
+def finalize_matcher_graph(path: Path, n_layers: int, stride: int):
+    """Finalize an existing ONNX matcher file."""
+    model = onnx.load(str(path))
+    _finalize_matcher_model(model, n_layers, stride)
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+
+
+def _postprocess_matcher_graph(path, n_layers, stride, check_layers):
+    model = onnx.load(str(path))
+    _finalize_matcher_model(model, n_layers, stride)
+    if check_layers:
+        _add_early_stopping_model(model, check_layers, n_layers)
     onnx.checker.check_model(model)
     onnx.save(model, str(path))
 
@@ -789,9 +808,9 @@ def export_matcher(
                     torch.ops.flexglue.gelu.default: gelu_onnx,
                 },
             )
-        finalize_matcher_graph(staged, matcher.conf.n_layers, matcher.stride)
-        if check_layers:
-            add_early_stopping(staged, check_layers, matcher.conf.n_layers)
+        _postprocess_matcher_graph(
+            staged, matcher.conf.n_layers, matcher.stride, check_layers
+        )
         if path.exists():
             shutil.copymode(path, staged)
         staged.replace(path)
