@@ -32,7 +32,7 @@ def reference(source, table, target_hw, bgr):
             mode="bilinear",
             align_corners=False,
         )
-    return image
+    return image.contiguous()
 
 
 def tables(device):
