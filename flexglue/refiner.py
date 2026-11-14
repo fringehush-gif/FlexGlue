@@ -10,7 +10,7 @@ Adapted from the official implementation and weights:
 """
 
 from functools import partial
-from typing import Dict, Optional, Tuple
+from typing import Dict, NamedTuple, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -18,6 +18,63 @@ from torch import nn
 
 from .utils import ops
 from .utils import preprocess as pp
+
+
+class _UncertaintyState(NamedTuple):
+    # Private per-call transport; logits retain legacy scalar/packed arithmetic.
+    logits: torch.Tensor
+    factor: Optional[torch.Tensor]
+
+
+def _add_precision_factors(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Lower factor of XX.T + YY.T; inputs store (l00, l10, l11).
+
+    The cross product precedes normalization to avoid introducing a spurious
+    residual for exactly proportional FP32-origin factors. This is FP64
+    arithmetic, not an exact-arithmetic guarantee for arbitrary conditioning.
+    """
+    a, b, c = x.unbind(-1)
+    d, e, f = y.unbind(-1)
+    h = torch.hypot(a, d)
+    return torch.stack(
+        (h, (a * b + d * e) / h, torch.hypot(torch.hypot(c, f), (a * e - d * b) / h)),
+        -1,
+    )
+
+
+def _interpolate_precision_factor(
+    factor: torch.Tensor, size: Tuple[int, int]
+) -> torch.Tensor:
+    """Bilinear precision mixture, not linear interpolation of its factor."""
+    h, w = factor.shape[1:3]
+    if (h, w) == size:
+        return factor
+
+    def axis(length, count):
+        p = torch.arange(count, dtype=factor.dtype, device=factor.device) + 0.5
+        p = (p * (length / count) - 0.5).clamp(0, length - 1)
+        lo = p.floor().long()
+        return lo, (lo + 1).clamp(max=length - 1), p - lo
+
+    y0, y1, wy = axis(h, size[0])
+    x0, x1, wx = axis(w, size[1])
+    horizontal = _add_precision_factors(
+        factor[:, :, x0] * (1 - wx).sqrt()[None, None, :, None],
+        factor[:, :, x1] * wx.sqrt()[None, None, :, None],
+    )
+    return _add_precision_factors(
+        horizontal[:, y0] * (1 - wy).sqrt()[None, :, None, None],
+        horizontal[:, y1] * wy.sqrt()[None, :, None, None],
+    )
+
+
+def _covariance_factor(factor: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Upper R in destination pixels with covariance R @ R.T."""
+    a, b, c = factor.unbind(-1)
+    x = scale[..., 0].double() / a
+    z = scale[..., 1].double() / c
+    y = -scale[..., 0].double() * ((b / a) / c)
+    return torch.stack((x, y, torch.zeros_like(x), z), -1).unflatten(-1, (2, 2))
 
 
 def bhwc_interpolate(x: torch.Tensor, size: Tuple[int, int]) -> torch.Tensor:
@@ -129,9 +186,12 @@ class ConvRefiner(nn.Module):
         f_i: torch.Tensor,
         f_j: torch.Tensor,
         warp: torch.Tensor,
-        mlogit_i: torch.Tensor,
+        mlogit_i: Union[torch.Tensor, _UncertaintyState],
         scale_factor: Tuple[float, float],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Union[torch.Tensor, _UncertaintyState]]:
+        state = mlogit_i if isinstance(mlogit_i, _UncertaintyState) else None
+        if state is not None:
+            mlogit_i = state.logits
         h, w = f_i.shape[1:3]
         if f_j.shape[1:3] != (h, w):
             raise ValueError(
@@ -166,8 +226,17 @@ class ConvRefiner(nn.Module):
             d[..., 2],
             F.softplus(d[..., 3]) + 1e-6,
         )
+        factor = None
+        if state is not None:
+            factor = torch.stack((l00, l10, l11), -1).double()
+            if state.factor is not None:
+                factor = _add_precision_factors(state.factor, factor)
         d = torch.stack([d[..., 0], l00 * l00, l00 * l10, l10 * l10 + l11 * l11], -1)
         mlogit_i = F.pad(mlogit_i, (0, 4 - mlogit_i.shape[-1])) + d
+        # Direct legacy Tensor callers retain the old stage operation. Internal
+        # default refinement passes explicit state and retains pre-pack factors.
+        if state is not None:
+            mlogit_i = _UncertaintyState(mlogit_i, factor)
         return warp, mlogit_i
 
 
@@ -238,15 +307,29 @@ class RoMav2Refiner(nn.Module):
         feats_j: Dict[int, torch.Tensor],
         gridi_nj: torch.Tensor,
         mlogit_i: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Refine coarse grid (b, hc, wc, 2) with logits (b, hc, wc) to refine size."""
+    ) -> Tuple[torch.Tensor, _UncertaintyState]:
+        """Private prototype: return per-call logits/factor state.
+
+        Stage/forward hooks and overrides must preserve this explicit state;
+        Tensor-only state assumptions require adaptation. No module side channel.
+        """
         h, w = feats_i[1].shape[1:3]
         scale_factor = (w / self.anchor, h / self.anchor)
-        mlogit_i = mlogit_i[..., None]
+        mlogit_i = _UncertaintyState(mlogit_i[..., None], None)
         for s in self.scales:
             size = (h // s, w // s)
             gridi_nj = bhwc_interpolate(gridi_nj, size)
-            mlogit_i = bhwc_interpolate(mlogit_i, size)
+            if not isinstance(mlogit_i, _UncertaintyState):
+                raise TypeError(
+                    "default covariance requires internal uncertainty state; "
+                    "adapt Tensor-returning custom stages/hooks"
+                )
+            factor = mlogit_i.factor
+            if factor is not None:
+                factor = _interpolate_precision_factor(factor, size)
+            mlogit_i = _UncertaintyState(
+                bhwc_interpolate(mlogit_i.logits, size), factor
+            )
             gridi_nj, mlogit_i = self.refiners[str(s)](
                 feats_i[s], feats_j[s], gridi_nj, mlogit_i, scale_factor
             )
@@ -261,18 +344,23 @@ class RoMav2Refiner(nn.Module):
         size_j: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """Grid of image i at refine size in image j (size_j: b x (w, h)), with cov."""
-        gridi_nj, mlogit_i = self(feats_i, feats_j, cgridi_nj, clogit_i)
+        gridi_nj, state = self(feats_i, feats_j, cgridi_nj, clogit_i)
+        if not isinstance(state, _UncertaintyState) or state.factor is None:
+            raise TypeError(
+                "default covariance requires internal uncertainty state; "
+                "adapt Tensor-returning custom forward/stages/hooks"
+            )
+        mlogit_i = state.logits
         h_rj, w_rj = feats_j[1].shape[1:3]
         # RoMa's precision is in refine pixels of image j: invert, then scale to image j
-        p00, p10, p11 = mlogit_i[..., 1], mlogit_i[..., 2], mlogit_i[..., 3]
-        cov = torch.stack([p11, -p10, -p10, p00], -1).unflatten(-1, (2, 2))
-        cov = cov / (p00 * p11 - p10 * p10)[..., None, None]
-        scale = torch.stack([size_j[:, 0] / w_rj, size_j[:, 1] / h_rj], -1)[
-            :, None, None
-        ]
+        scale = torch.stack(
+            [size_j[:, 0].double() / w_rj, size_j[:, 1].double() / h_rj], -1
+        )[:, None, None]
+        covariance_factor = _covariance_factor(state.factor, scale)
+        cov = covariance_factor @ covariance_factor.mT
         return {
             "dense_p2di_nj": gridi_nj,
             "dense_p2di_ij": ops.denormalize_keypoints(gridi_nj, size_j),
             "dense_confidencei": torch.sigmoid(mlogit_i[..., 0]),
-            "dense_covi_ij": cov * scale[..., :, None] * scale[..., None, :],
+            "dense_covi_ij": cov,
         }

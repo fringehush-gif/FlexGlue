@@ -169,6 +169,10 @@ pred = matcher.match_dense(inputs0, inputs1)
 pred = matcher.match(inputs0, inputs1)  # refined matches
 ```
 
+Refined dense covariance fields `dense_cov{i}_i{j}` are returned as `torch.float64` in destination-image pixel units. Consumers that require another dtype must convert explicitly and account for the precision loss.
+
+The refiner's internal multi-stage call passes a private structured uncertainty state between stages, and direct RoMav2Refiner.forward callers now receive that state instead of a Tensor. Hooks or custom stage overrides that assumed the stage's uncertainty input or output was always a Tensor must preserve the state (including its factor) or be updated; Tensor-only replacements are not accepted by the default covariance path. Direct calls to `ConvRefiner` with a Tensor uncertainty input continue to return a Tensor uncertainty output.
+
 **To improve matching accuracy and robustness**, the biggest lever is increased resolution (see Table 2 in the paper):
 
 ```python
