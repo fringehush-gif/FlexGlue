@@ -2,7 +2,9 @@
 import importlib.util
 import tempfile
 import unittest
+import weakref
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -196,6 +198,100 @@ class ExportAllocationTest(unittest.TestCase):
                     a.g for a in conditionals[0].attribute if a.name == "else_branch"
                 )
         self.assertEqual(len(graph.initializer[0].raw_data), 4_194_304)
+
+    def test_cli_releases_descriptor_after_status_before_matcher(self):
+        export = self.export
+        refs, events = [], []
+
+        class Descriptor:
+            def __init__(self, **kwargs):
+                refs.append(weakref.ref(self))
+
+            def eval(self):
+                return self
+
+        class Matcher:
+            def __init__(self, **kwargs):
+                self.assert_descriptor_released()
+                events.append("matcher")
+
+            def assert_descriptor_released(self):
+                if refs[0]() is not None:
+                    raise AssertionError(
+                        "descriptor still alive when matcher is constructed"
+                    )
+
+            def eval(self):
+                return self
+
+        def descriptor_export(descriptor, *_):
+            self.assertIs(refs[0](), descriptor)
+            events.append("descriptor export")
+
+        def status(path, _):
+            if path.name == "flexglue_descriptor.onnx":
+                self.assertIsNotNone(refs[0]())
+                events.append("descriptor status")
+            else:
+                events.append("matcher status")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(
+                size=(32, 32),
+                output_dir=Path(tmp),
+                matcher_only=False,
+                weights=None,
+                opset=18,
+                matcher_name="matcher.onnx",
+                fp16=False,
+                no_fused_attention=True,
+                early_stop_layers=[],
+            )
+            with patch.object(export, "parse_args", return_value=args), patch.object(
+                export, "DINOv3Descriptor", Descriptor
+            ), patch.object(export, "FlexGlue", Matcher), patch.object(
+                export, "export_descriptor", new=descriptor_export
+            ), patch.object(
+                export,
+                "export_matcher",
+                side_effect=lambda *a, **kw: events.append("matcher export"),
+            ), patch.object(
+                export, "print_exported", side_effect=status
+            ):
+                export.main()
+            self.assertEqual(
+                events,
+                [
+                    "descriptor export",
+                    "descriptor status",
+                    "matcher",
+                    "matcher export",
+                    "matcher status",
+                ],
+            )
+
+    def test_cli_descriptor_export_failure_does_not_construct_matcher(self):
+        export = self.export
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(
+                size=(32, 32),
+                output_dir=Path(tmp),
+                matcher_only=False,
+                weights=None,
+                opset=18,
+            )
+            with patch.object(export, "parse_args", return_value=args), patch.object(
+                export, "DINOv3Descriptor"
+            ) as descriptor, patch.object(export, "FlexGlue") as matcher, patch.object(
+                export, "export_descriptor", side_effect=RuntimeError("failed")
+            ), patch.object(
+                export, "print_exported"
+            ) as status:
+                with self.assertRaisesRegex(RuntimeError, "failed"):
+                    export.main()
+                descriptor.return_value.eval.assert_called_once()
+                matcher.assert_not_called()
+                status.assert_not_called()
 
     def test_path_wrappers_remain_usable(self):
         import onnx

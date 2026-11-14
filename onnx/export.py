@@ -868,6 +868,7 @@ def main():
         path, t = args.output_dir / "flexglue_descriptor.onnx", time.time()
         export_descriptor(descriptor, path, size, args.opset)
         print_exported(path, t)
+        del descriptor
     matcher = FlexGlue(weights=args.weights, describe=False, mp=None).eval()
     path, t = args.output_dir / args.matcher_name, time.time()
     export_matcher(
