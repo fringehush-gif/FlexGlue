@@ -69,7 +69,10 @@ import argparse
 import contextlib
 import copy
 import hashlib
+import re
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -219,7 +222,9 @@ class SparseMatcherONNX(nn.Module):
         super().__init__()
         self.matcher = matcher
         self.n_layers = matcher.conf.n_layers
-        self.conf = matcher.resolve_conf({"mp": None, "exact_nn": True})
+        self.conf = matcher.resolve_conf(
+            {"mp": None, "exact_nn": True, "early_stop_decay": None}
+        )
         self.debug_outputs = debug_outputs
         # Cast the transformer layers to float16, including their residual
         # stream and LayerNorms, unlike the autocast of FlexGlue(mp="float16")
@@ -322,8 +327,14 @@ class LayerScoresMatcherONNX(SparseMatcherONNX):
     """
 
     def __init__(self, matcher: FlexGlue, check_layers, fp16: bool = False):
+        check_layers = matcher.stopping_layers(
+            SimpleNamespace(
+                n_layers=matcher.conf.n_layers, early_stop_layers=check_layers
+            )
+        )
+        matcher.require_heads(check_layers)
         super().__init__(matcher, fp16)
-        self.check_layers = tuple(check_layers)
+        self.check_layers = check_layers
 
     def forward(
         self,
@@ -476,7 +487,78 @@ def early_stop_check(k: int, n_layers: int, outputs, continue_branch):
     return stop_condition(prefix, score, n_layers - k) + [if_node]
 
 
-def add_early_stopping(path: Path, check_layers, n_layers: int):
+def read_early_stop_layers(graphs, n_layers=9):
+    """Read only the supported score/decay predicates, independent of node names."""
+    layers = []
+    for graph in graphs:
+        producers = {output: node for node in graph.node for output in node.output}
+
+        def node(value, op):
+            result = producers.get(value)
+            return result if result is not None and result.op_type == op else None
+
+        def scalar(value):
+            constant = node(value, "Constant")
+            if constant is None:
+                return None
+            for attr in constant.attribute:
+                if attr.name == "value":
+                    value = onnx.numpy_helper.to_array(helper.get_attribute_value(attr))
+                    return float(value) if value.size == 1 else None
+            return None
+
+        for conditional in graph.node:
+            if conditional.op_type != "If":
+                continue
+            condition = (
+                node(conditional.input[0], "Less")
+                if len(conditional.input) == 1
+                else None
+            )
+            inputs = condition.input if condition is not None else ()
+            match = (
+                re.fullmatch(r"covisibility_score_layer(\d+)", inputs[0])
+                if len(inputs) == 2
+                else None
+            )
+            layer = int(match.group(1)) if match else 0
+            mul = node(inputs[1], "Mul") if match else None
+            factors = list(mul.input) if mul is not None else []
+            gamma = next((v for v in factors if v != "min_covisibility"), None)
+            power = node(gamma, "Pow") if gamma is not None else None
+            exponent = (
+                scalar(power.input[1])
+                if power is not None and len(power.input) == 2
+                else None
+            )
+            sub = (
+                node(power.input[0], "Sub")
+                if power is not None and len(power.input) == 2
+                else None
+            )
+            valid_sub = (
+                sub is not None
+                and len(sub.input) == 2
+                and sub.input[1] == "early_stop_decay"
+                and scalar(sub.input[0]) == 1.0
+            )
+            if (
+                not 0 < layer < n_layers
+                or len(factors) != 2
+                or factors.count("min_covisibility") != 1
+                or exponent != n_layers - layer
+                or not valid_sub
+            ):
+                raise ValueError(
+                    "Cannot identify every early-stop predicate in this graph."
+                )
+            layers.append(layer)
+    if len(layers) != len(set(layers)):
+        raise ValueError("The graph has duplicate early-stop stages.")
+    return sorted(layers)
+
+
+def _add_early_stopping_model(model, check_layers, n_layers: int):
     """Turn the graph of LayerScoresMatcherONNX into nested If nodes.
 
     After each layer k in check_layers, the pair is rejected without running
@@ -490,7 +572,6 @@ def add_early_stopping(path: Path, check_layers, n_layers: int):
     min_covisibility = 0). When stopping early, matches0 is -1, mscores0 is 0
     and covisibility_score is the score of the last layer run.
     """
-    model = onnx.load(str(path))
     graph = model.graph
     nodes = list(graph.node)
     score_names = [f"covisibility_score_layer{k}" for k in check_layers]
@@ -499,41 +580,42 @@ def add_early_stopping(path: Path, check_layers, n_layers: int):
     stages = stage_node_indices(nodes, [[n] for n in score_names] + [final_names])
     inits = stage_initializers(graph, nodes, stages)
 
-    # Build the nested Ifs from the innermost check to the outermost. The last
-    # stage produces renamed outputs, since the If node around it does.
-    outputs = [f"{n}_full" for n in final_names]
-    stage_nodes = rename_values(
-        [nodes[i] for i in stages[-1]], dict(zip(final_names, outputs))
-    )
-    graph_name = "layers_after_last_check"
-    for c in reversed(range(len(check_layers))):
-        body = helper.make_graph(
-            stage_nodes,
-            graph_name,
-            [],
-            matcher_output_info(outputs),
-            initializer=inits[c + 1],
-        )
-        k = check_layers[c]
-        outputs = (
-            final_names
-            if c == 0
-            else [f"{n}_after_layer{check_layers[c - 1]}" for n in final_names]
-        )
-        stage_nodes = [nodes[i] for i in stages[c]]
-        stage_nodes += early_stop_check(k, n_layers, outputs, body)
-        graph_name = f"layers_after_check{c}"
-
+    # Insert each If with an empty continuation, then populate the actual
+    # else-branch owned by the parent node. This avoids copying completed
+    # nested graphs (and their initializer payload) into outer If nodes.
+    full_outputs = [f"{n}_full" for n in final_names]
+    rename_values([nodes[i] for i in stages[-1]], dict(zip(final_names, full_outputs)))
     del graph.node[:]
-    graph.node.extend(stage_nodes)
+    graph.node.extend(nodes[i] for i in stages[0])
     del graph.initializer[:]
     graph.initializer.extend(inits[0])
+    parent, outputs = graph, final_names
+    for c, k in enumerate(check_layers):
+        last = c == len(check_layers) - 1
+        next_outputs = (
+            full_outputs if last else [f"{n}_after_layer{k}" for n in final_names]
+        )
+        name = "layers_after_last_check" if last else f"layers_after_check{c + 1}"
+        skeleton = helper.make_graph([], name, [], matcher_output_info(next_outputs))
+        parent.node.extend(early_stop_check(k, n_layers, outputs, skeleton))
+        conditional = parent.node[-1]
+        parent = next(a.g for a in conditional.attribute if a.name == "else_branch")
+        parent.node.extend(nodes[i] for i in stages[c + 1])
+        parent.initializer.extend(inits[c + 1])
+        outputs = next_outputs
+
     del graph.output[:]
     graph.output.extend(matcher_output_info(final_names))
     graph.input.append(
         helper.make_tensor_value_info("early_stop_decay", TensorProto.FLOAT, [])
     )
     del graph.value_info[:]
+
+
+def add_early_stopping(path: Path, check_layers, n_layers: int):
+    """Add early stopping to an existing ONNX file."""
+    model = onnx.load(str(path))
+    _add_early_stopping_model(model, check_layers, n_layers)
     onnx.checker.check_model(model)
     onnx.save(model, str(path))
 
@@ -565,6 +647,7 @@ def export_descriptor(descriptor, path: Path, size, opset: int):
         output_names=["features"],
         opset_version=opset,
         dynamo=True,
+        verbose=False,
         external_data=False,
     )
 
@@ -610,8 +693,8 @@ KEYPOINT_DIMS = {
 }
 
 
-def make_keypoint_dims_dynamic(path: Path):
-    """Remove shapes specialized to the dummy number of keypoints.
+def _finalize_matcher_model(model, n_layers: int, stride: int):
+    """Record the matcher contract and remove specialized keypoint shapes.
 
     The exporter may annotate intermediate values (value_info) and outputs with
     the concrete number of keypoints of the dummy inputs. ONNX Runtime uses
@@ -619,13 +702,32 @@ def make_keypoint_dims_dynamic(path: Path):
     with static reshapes), which then fail for other numbers of keypoints.
     Clear the intermediate annotations and name the dynamic dimensions.
     """
-    model = onnx.load(str(path))
+    metadata = {entry.key: entry.value for entry in model.metadata_props}
+    metadata.update(
+        {"flexglue.n_layers": str(n_layers), "flexglue.stride": str(stride)}
+    )
+    helper.set_model_props(model, metadata)
     del model.graph.value_info[:]
     for value in list(model.graph.input) + list(model.graph.output):
         if value.name in KEYPOINT_DIMS:
             dim = value.type.tensor_type.shape.dim[1]
             dim.Clear()
             dim.dim_param = KEYPOINT_DIMS[value.name]
+
+
+def finalize_matcher_graph(path: Path, n_layers: int, stride: int):
+    """Finalize an existing ONNX matcher file."""
+    model = onnx.load(str(path))
+    _finalize_matcher_model(model, n_layers, stride)
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+
+
+def _postprocess_matcher_graph(path, n_layers, stride, check_layers):
+    model = onnx.load(str(path))
+    _finalize_matcher_model(model, n_layers, stride)
+    if check_layers:
+        _add_early_stopping_model(model, check_layers, n_layers)
     onnx.checker.check_model(model)
     onnx.save(model, str(path))
 
@@ -640,7 +742,25 @@ def export_matcher(
     debug_outputs: bool = False,
     early_stop_layers=None,
 ):
-    """Export a copy of the matcher (the export modifies it in place)."""
+    """Export a copy of the matcher (the export modifies it in place).
+
+    Compiled native dispatch is unsupported; export before calling compile().
+    Publish a complete single-file graph by replacement, following destination
+    symlinks and retaining existing permission bits. Other file metadata and ACLs
+    follow the new file and its directory; concurrent writers are unsupported.
+    """
+    check_layers = (
+        ()
+        if early_stop_layers is None
+        else matcher.stopping_layers(
+            SimpleNamespace(
+                n_layers=matcher.conf.n_layers, early_stop_layers=early_stop_layers
+            )
+        )
+    )
+    matcher.require_heads((matcher.conf.n_layers, *check_layers))
+    if check_layers and debug_outputs:
+        raise ValueError("debug_outputs cannot be combined with early stopping.")
     if matcher.static_lengths is not None:
         raise ValueError(
             "Export requires an uncompiled matcher; export before calling compile()."
@@ -649,40 +769,46 @@ def export_matcher(
         _reject_compiled(block.forward, "matcher transformer")
     matcher = copy.deepcopy(matcher)
     output_names = MATCHER_OUTPUTS + (DEBUG_OUTPUTS if debug_outputs else [])
-    if early_stop_layers:
-        assert not debug_outputs
-        check_layers = sorted(early_stop_layers)
-        assert 1 <= check_layers[0] and check_layers[-1] < matcher.conf.n_layers
+    if check_layers:
         model = LayerScoresMatcherONNX(matcher, check_layers, fp16=fp16).eval()
         output_names += [f"covisibility_score_layer{k}" for k in check_layers]
     else:
         model = SparseMatcherONNX(matcher, fp16, debug_outputs).eval()
     inputs = dummy_matcher_inputs(size)
+    # torch.export specializes size-one dimensions; the graph still accepts N=1.
     n0 = torch.export.Dim("num_keypoints0", min=2, max=65536)
     n1 = torch.export.Dim("num_keypoints1", min=2, max=65536)
     dynamic_shapes = {name: None for name in MATCHER_INPUTS}
     dynamic_shapes["kpts0"], dynamic_shapes["kpts1"] = {1: n0}, {1: n1}
-    with exportable(matcher, fused):
-        torch.onnx.export(
-            model,
-            inputs,
-            str(path),
-            input_names=MATCHER_INPUTS,
-            output_names=output_names,
-            dynamic_shapes=dynamic_shapes,
-            opset_version=opset,
-            dynamo=True,
-            external_data=False,
-            custom_translation_table={
-                torch.ops.flexglue.multi_head_attention.default: (
-                    multi_head_attention_onnx
-                ),
-                torch.ops.flexglue.gelu.default: gelu_onnx,
-            },
+    # Publish only a complete graph; preserve an existing destination on failure.
+    path = Path(path).resolve()
+    with tempfile.TemporaryDirectory(dir=path.parent) as temporary:
+        staged = Path(temporary) / path.name
+        with exportable(matcher, fused):
+            torch.onnx.export(
+                model,
+                inputs,
+                str(staged),
+                input_names=MATCHER_INPUTS,
+                output_names=output_names,
+                dynamic_shapes=dynamic_shapes,
+                opset_version=opset,
+                dynamo=True,
+                verbose=False,
+                external_data=False,
+                custom_translation_table={
+                    torch.ops.flexglue.multi_head_attention.default: (
+                        multi_head_attention_onnx
+                    ),
+                    torch.ops.flexglue.gelu.default: gelu_onnx,
+                },
+            )
+        _postprocess_matcher_graph(
+            staged, matcher.conf.n_layers, matcher.stride, check_layers
         )
-    make_keypoint_dims_dynamic(path)
-    if early_stop_layers:
-        add_early_stopping(path, check_layers, matcher.conf.n_layers)
+        if path.exists():
+            shutil.copymode(path, staged)
+        staged.replace(path)
 
 
 def parse_args():
@@ -742,6 +868,7 @@ def main():
         path, t = args.output_dir / "flexglue_descriptor.onnx", time.time()
         export_descriptor(descriptor, path, size, args.opset)
         print_exported(path, t)
+        del descriptor
     matcher = FlexGlue(weights=args.weights, describe=False, mp=None).eval()
     path, t = args.output_dir / args.matcher_name, time.time()
     export_matcher(
