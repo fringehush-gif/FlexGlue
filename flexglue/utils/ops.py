@@ -146,9 +146,9 @@ def sq_dist(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     if x.shape[-1] == 0:  # Preserve the empty sum of the original implementation.
         return 0
-    dist = (x[..., 0, None] - y[..., 0][:, None]).square()
+    dist = (x[..., 0, None] - y[..., 0][:, None]).pow_(2)
     for i in range(1, x.shape[-1]):
-        dist.add_((x[..., i, None] - y[..., i][:, None]).square())
+        dist.add_((x[..., i, None] - y[..., i][:, None]).pow_(2))
     return dist
 
 
