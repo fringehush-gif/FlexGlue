@@ -90,19 +90,18 @@ def entmax15_window_readout(logits, grid, hw, radius: int = 1, k: int = 512) -> 
     if logits.shape[-1] > k:  # maximum and threshold from the same (sorted) top-k
         topv, topi = logits.topk(k, dim=-1)
         vmax, idx = topv[..., :1], topi[..., :1]
-        y = (logits - vmax) / 2
         tau = sorted_entmax15_threshold((topv - vmax) / 2)
     else:
         vmax, idx = logits.max(-1, keepdim=True)
-        y = (logits - vmax) / 2
-        tau = entmax15_threshold(y, k)
+        tau = entmax15_threshold((logits - vmax) / 2, k)
     h, w = hw
-    r = torch.arange(-radius, radius + 1, device=y.device)
+    r = torch.arange(-radius, radius + 1, device=logits.device)
     ny = (idx // w)[..., None] + r[:, None]
     nx = (idx % w)[..., None] + r[None, :]
     inside = ((ny >= 0) & (ny < h) & (nx >= 0) & (nx < w)).flatten(-2)
     nidx = (ny.clamp(0, h - 1) * w + nx.clamp(0, w - 1)).flatten(-2)
-    p = (y.gather(-1, nidx) - tau).clamp_min(0).square()  # entmax sums to 1
+    window = (logits.gather(-1, nidx) - vmax) / 2
+    p = (window - tau).clamp_min(0).square()  # entmax sums to 1
     position = (p[..., None] * grid[nidx]).sum(-2) / p.sum(-1, keepdim=True)
     return position, (p * inside).sum(-1)  # clamped border cells count once
 
@@ -122,9 +121,12 @@ def sq_dist(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     run in TF32 (e.g. ONNX Runtime on CUDA by default). One coordinate at a time,
     without (B, M, N, D) intermediates.
     """
-    return sum(
-        (x[..., i, None] - y[..., i][:, None]).square() for i in range(x.shape[-1])
-    )
+    if x.shape[-1] == 0:  # Preserve the empty sum of the original implementation.
+        return 0
+    dist = (x[..., 0, None] - y[..., 0][:, None]).pow_(2)
+    for i in range(1, x.shape[-1]):
+        dist.add_((x[..., i, None] - y[..., i][:, None]).pow_(2))
+    return dist
 
 
 def is_set(threshold) -> bool:
