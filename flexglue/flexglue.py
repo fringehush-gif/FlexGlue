@@ -316,9 +316,10 @@ class FlexGlue(nn.Module):
         covisibility_score: Optional[torch.Tensor] = None,
     ) -> PairContext:
         """PairContext from the tokens after layer, float32 cross features."""
-        x0, x1 = x0.float(), x1.float()
-        if self.static_lengths is not None:  # own the tokens, not the graph's buffers
-            x0, x1 = x0.clone(), x1.clone()
+        # Compiled graph outputs need owned storage, even when already FP32.
+        own_tokens = self.static_lengths is not None
+        x0 = x0.to(dtype=torch.float32, copy=own_tokens)
+        x1 = x1.to(dtype=torch.float32, copy=own_tokens)
         if covisibility_score is None:
             covisibility_score = self.covisibility_score(x0, x1, layer)
         cf = (x0.mT.unflatten(-1, hw[0]), x1.mT.unflatten(-1, hw[1]))
@@ -392,7 +393,9 @@ class FlexGlue(nn.Module):
         ):
             return head(points_ni, cf_i, cf_j)
         length = next(s for s in self.static_lengths if s >= n)
-        points_ni = F.pad(points_ni, (0, 0, 0, length - n))  # rows are independent
+        # Preserve the contiguous compiled input contract for strided views.
+        if n != length or not points_ni.is_contiguous():
+            points_ni = F.pad(points_ni, (0, 0, 0, length - n))
         p2di_nj, confidence = head.compiled_forward(points_ni, cf_i, cf_j)
         # clone: CUDA graph outputs are overwritten by the next replay
         return p2di_nj[:, :n].clone(), confidence[:, :n].clone()
