@@ -43,6 +43,8 @@ def threshold(ys, *, native):
         or torch.onnx.is_in_onnx_export()
     ):
         return native(ys)
+    if ys.is_neg():
+        return native(ys)
     if (
         torch.autograd.forward_ad.unpack_dual(ys).tangent is not None
         or not ys.is_cuda

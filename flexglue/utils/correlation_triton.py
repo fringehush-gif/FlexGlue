@@ -24,6 +24,8 @@ def eligible(a, b, warp, radius):
         or torch.get_default_dtype() != torch.float32
     ):
         return False
+    if any(x.is_neg() for x in (a, b, warp)):
+        return False
     if any(
         torch.autograd.forward_ad.unpack_dual(x).tangent is not None
         for x in (a, b, warp)
@@ -138,8 +140,9 @@ def fused(
                 m[:, None] & (c[None, :] < C),
                 0,
             )
-            wx = tl.where(ox == 0, 1.0 - dx, dx)
-            wy = tl.where(oy == 0, 1.0 - dy, dy)
+            # Form integer neighbors before FP32 conversion, as native CUDA does.
+            wx = tl.where(ox == 0, (x0 + 1).to(tl.float32) - ix, dx)
+            wy = tl.where(oy == 0, (y0 + 1).to(tl.float32) - iy, dy)
             sample += v * (wx * wy)[:, None]
     av = tl.load(
         A + batch[:, None] * a0 + c[None, :] * a1 + y[:, None] * a2 + x[:, None] * a3,

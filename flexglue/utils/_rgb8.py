@@ -127,6 +127,9 @@ def prepare_rgb8(
             or not table.is_contiguous()
         ):
             raise ValueError("caller-owned codebook binding differs")
+        if table.is_neg():
+            table.record_stream(stream)
+            table = table.resolve_neg()
     output = resize(source, table, target_hw, bool(source_is_bgr))
     if (
         output.device != device
