@@ -38,18 +38,18 @@ class ReadoutSelectionTest(unittest.TestCase):
             FlexGlue(weights=None, describe=False, n_layers=0)
 
     def test_threshold_injection_and_low_precision(self):
-        grid = ops.cell_centers(24, 24, scale=(24, 24), device="cpu")
+        grid = ops.cell_centers(8, 8, scale=(8, 8), device="cpu")
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
-            logits = torch.randn(1, 2, 576).to(dtype)
+            logits = torch.randn(1, 2, 64).to(dtype)
             calls = []
 
             def threshold(ys):
                 calls.append(ys.dtype)
                 return ops.sorted_entmax15_threshold(ys)
 
-            expected = ops.entmax15_window_readout(logits, grid, (24, 24))
+            expected = ops.entmax15_window_readout(logits, grid, (8, 8))
             actual = ops.entmax15_window_readout(
-                logits, grid, (24, 24), threshold=threshold
+                logits, grid, (8, 8), threshold=threshold
             )
             self.assertEqual(calls, [torch.float32])
             for left, right in zip(actual, expected):
@@ -74,6 +74,34 @@ class ReadoutSelectionTest(unittest.TestCase):
     HAS_TRITON and torch.cuda.is_available(), "CUDA and Triton required"
 )
 class ReadoutCUDATest(unittest.TestCase):
+    def test_exact_512_readout_dispatches_threshold(self):
+        from flexglue.utils import entmax_triton
+
+        kernel = entmax_triton._threshold
+        launches = []
+
+        class Spy:
+            def __getitem__(self, grid):
+                launches.append(grid)
+                return kernel[grid]
+
+        grid = ops.cell_centers(16, 32, scale=(16, 32), device="cuda")
+        logits = torch.randn(1, 2, 512, device="cuda")
+        with torch.no_grad():
+            expected = ops.entmax15_window_readout(logits, grid, (16, 32))
+            with patch.object(entmax_triton, "_threshold", Spy()):
+                actual = ops.entmax15_window_readout(
+                    logits,
+                    grid,
+                    (16, 32),
+                    threshold=functools.partial(
+                        entmax_triton.threshold, native=ops.sorted_entmax15_threshold
+                    ),
+                )
+            self.assertEqual(len(launches), 1)
+            for a, e in zip(actual, expected):
+                torch.testing.assert_close(a, e, rtol=0, atol=0)
+
     def test_lazy_negative_view_delegates_without_launch(self):
         from flexglue.utils import entmax_triton
 
