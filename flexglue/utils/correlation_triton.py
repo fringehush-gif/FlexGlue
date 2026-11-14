@@ -90,7 +90,6 @@ def fused(
     BC: tl.constexpr,
     BP: tl.constexpr,
     SCALE: tl.constexpr,
-    TORCH_ORDER: tl.constexpr,
 ):
     p = tl.program_id(0) * BP + tl.arange(0, BP)
     c = tl.arange(0, BC)
@@ -147,19 +146,16 @@ def fused(
         0,
     )
     product = (av / SCALE) * sample
-    if TORCH_ORDER:
-        q = tl.arange(0, 4)
-        accum = tl.full((BP, 4), 0.0, tl.float32)
-        for j in range(tl.cdiv(C, 4)):
-            idx = tl.broadcast_to((4 * j + q)[None, :], (BP, 4))
-            accum += tl.gather(product, idx, axis=1)
-        z0 = tl.sum(tl.where(q[None, :] == 0, accum, 0.0), axis=1)
-        z1 = tl.sum(tl.where(q[None, :] == 1, accum, 0.0), axis=1)
-        z2 = tl.sum(tl.where(q[None, :] == 2, accum, 0.0), axis=1)
-        z3 = tl.sum(tl.where(q[None, :] == 3, accum, 0.0), axis=1)
-        value = ((z0 + z1) + z2) + z3
-    else:
-        value = tl.sum(product, axis=1)
+    q = tl.arange(0, 4)
+    accum = tl.full((BP, 4), 0.0, tl.float32)
+    for j in range(tl.cdiv(C, 4)):
+        idx = tl.broadcast_to((4 * j + q)[None, :], (BP, 4))
+        accum += tl.gather(product, idx, axis=1)
+    z0 = tl.sum(tl.where(q[None, :] == 0, accum, 0.0), axis=1)
+    z1 = tl.sum(tl.where(q[None, :] == 1, accum, 0.0), axis=1)
+    z2 = tl.sum(tl.where(q[None, :] == 2, accum, 0.0), axis=1)
+    z3 = tl.sum(tl.where(q[None, :] == 3, accum, 0.0), axis=1)
+    value = ((z0 + z1) + z2) + z3
     tl.store(OUT + ((batch * H + y) * W + x) * K + k, value, valid)
 
 
@@ -189,7 +185,6 @@ def _correlation(a, b, warp, radius):
         triton.next_power_of_2(c),
         16,
         math.sqrt(c),
-        True,
         enable_fp_fusion=True,
     )
     return out
