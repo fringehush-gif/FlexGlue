@@ -60,7 +60,7 @@ def exceptional_neighbours(test, device, compiled):
             with test.subTest(bits=bits, axis=axis, compiled=compiled):
                 test.assertPacketEqual(
                     reference(source, table, (5, 7), False),
-                    rgb8_torch._resize_rgb8(source, table, (5, 7), False),
+                    rgb8_torch._resize_rgb8(source, table, (5, 7), False, compiled),
                 )
 
 
@@ -147,6 +147,18 @@ class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
             result = rgb8_torch._resize_rgb8(source, tables("cpu")[0], (5, 7), False)
         self.assertEqual(result.shape, (1, 3, 5, 7))
 
+    def test_compilation_is_lazy_cached_and_errors_propagate(self):
+        rgb8_torch._compiled_converter.cache_clear()
+        self.addCleanup(rgb8_torch._compiled_converter.cache_clear)
+        with patch("torch.compile", return_value=rgb8_torch._convert_rgb8) as compile:
+            first = rgb8_torch._compiled_converter()
+            self.assertIs(first, rgb8_torch._compiled_converter())
+            compile.assert_called_once_with(rgb8_torch._convert_rgb8, dynamic=True)
+        rgb8_torch._compiled_converter.cache_clear()
+        with patch("torch.compile", side_effect=RuntimeError("compiler unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "compiler unavailable"):
+                rgb8_torch._compiled_converter()
+
     def test_degenerate_source_resize_keeps_nchw_contiguous(self):
         table = torch.from_numpy(fp32_codebook())
         for source_hw in ((1, 1), (1, 5), (5, 1), (3, 5)):
@@ -217,7 +229,7 @@ class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
         tensor = numpy_image_to_torch(image)
         with forbid_triton(), torch.no_grad():
             expected = matcher.descriptor({"image": tensor})
-            for backend in ("torch",):
+            for backend in ("torch", "torch-compile"):
                 with self.subTest(backend=backend), patch.object(
                     rgb8_torch,
                     "prepare_rgb8",
@@ -271,10 +283,12 @@ class TorchRGB8CudaTest(PacketAssertions, unittest.TestCase):
         # Test geometry families separately rather than exhaust Dynamo's cache
         # and accidentally validate its eager fallback as compiled execution.
         torch.compiler.reset()
+        rgb8_torch._compiled_converter.cache_clear()
         self.addCleanup(torch.compiler.reset)
+        self.addCleanup(rgb8_torch._compiled_converter.cache_clear)
 
     def test_large_factors_and_exceptional_neighbours(self):
-        for compiled in (False,):
+        for compiled in (False, True):
             for source_hw, target_hw in (
                 ((155, 224), (5, 7)),
                 ((65535, 7), (1, 7)),
@@ -290,7 +304,7 @@ class TorchRGB8CudaTest(PacketAssertions, unittest.TestCase):
                 table = tables("cuda")[0]
                 self.assertPacketEqual(
                     reference(source, table, target_hw, False),
-                    rgb8_torch._resize_rgb8(source, table, target_hw, False),
+                    rgb8_torch._resize_rgb8(source, table, target_hw, False, compiled),
                 )
             if compiled:
                 torch.compiler.reset()
@@ -316,13 +330,15 @@ class TorchRGB8CudaTest(PacketAssertions, unittest.TestCase):
             for table in tables("cuda"):
                 for bgr in (False, True):
                     expected = reference(source, table, (5, 7), bgr)
-                    for compiled in (False,):
+                    for compiled in (False, True):
                         with self.subTest(
                             shape=source.shape, bgr=bgr, compiled=compiled
                         ):
                             self.assertPacketEqual(
                                 expected,
-                                rgb8_torch._resize_rgb8(source, table, (5, 7), bgr),
+                                rgb8_torch._resize_rgb8(
+                                    source, table, (5, 7), bgr, compiled
+                                ),
                             )
 
     def test_pixels_features_keypoints_and_metadata(self):
@@ -339,13 +355,15 @@ class TorchRGB8CudaTest(PacketAssertions, unittest.TestCase):
                 expected = descriptor({"image": image, "keypoints": keypoints})
                 expected["keypoints"] = keypoints
                 pixels = descriptor.preprocess(image)
-                for backend in ("torch",):
+                for backend in ("torch", "torch-compile"):
                     with self.subTest(shape=rgb.shape, backend=backend):
                         actual = descriptor.describe_rgb8(
                             rgb, keypoints, backend=backend
                         )
                         self.assertPacketEqual(expected, actual)
-                        prepared = rgb8_torch.prepare_rgb8(rgb)
+                        prepared = rgb8_torch.prepare_rgb8(
+                            rgb, compile_conversion=backend == "torch-compile"
+                        )
                         self.assertPacketEqual(pixels, prepared.tensor)
 
     def test_eager_cuda_without_triton_and_deterministic_fallback(self):
@@ -364,7 +382,7 @@ class TorchRGB8CudaTest(PacketAssertions, unittest.TestCase):
             ):
                 expected = descriptor({"image": numpy_image_to_torch(rgb).cuda()})
                 self.assertPacketEqual(
-                    expected, descriptor.describe_rgb8(rgb, backend="torch")
+                    expected, descriptor.describe_rgb8(rgb, backend="torch-compile")
                 )
         finally:
             torch.use_deterministic_algorithms(previous, warn_only=warn_only)
@@ -381,13 +399,15 @@ class TorchRGB8CudaTest(PacketAssertions, unittest.TestCase):
             mode="bilinear",
             align_corners=False,
         )
-        for compiled in (False,):
+        for compiled in (False, True):
             stream = torch.cuda.Stream()
             with torch.inference_mode(), torch.cuda.stream(stream):
-                prepared = rgb8_torch.prepare_rgb8(rgb)
+                prepared = rgb8_torch.prepare_rgb8(rgb, compile_conversion=compiled)
                 prepared.require_current_stream()
                 saved = prepared.tensor.clone()
-                rgb8_torch.prepare_rgb8(np.bitwise_xor(rgb, 127))
+                rgb8_torch.prepare_rgb8(
+                    np.bitwise_xor(rgb, 127), compile_conversion=compiled
+                )
             with self.assertRaisesRegex(RuntimeError, "producer stream"):
                 prepared.require_current_stream()
             torch.cuda.current_stream().wait_stream(stream)
