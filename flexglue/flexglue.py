@@ -44,7 +44,7 @@ class FlexGlue(nn.Module):
         "remove_border_px": 0.0,  # border margin, pixels of the descriptor input
         "mp": "float16",  # transformer dtype: float16, bfloat16 or None (fp32)
         "describe": True,  # build a DINOv3Descriptor for inputs without features
-        "rgb8_backend": "torch",  # eager default
+        "rgb8_backend": "torch",  # eager default; optional "torch-compile"
         "rgb8_host_sampling": False,  # opt in to CPU lattice selection
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
         "refine": False,  # refine with RoMa v2's dense refiners
@@ -72,8 +72,8 @@ class FlexGlue(nn.Module):
     def __init__(self, **conf) -> None:
         super().__init__()
         self.conf = conf = SimpleNamespace(**{**self.default_conf, **conf})
-        if conf.rgb8_backend not in (None, "torch"):
-            raise ValueError("rgb8_backend must be None or 'torch'.")
+        if conf.rgb8_backend not in (None, "torch", "torch-compile"):
+            raise ValueError("rgb8_backend must be None, 'torch' or 'torch-compile'.")
         if not isinstance(conf.rgb8_host_sampling, bool):
             raise ValueError("rgb8_host_sampling must be a bool.")
         d, h = conf.descriptor_dim, conf.num_heads
@@ -755,8 +755,8 @@ class FlexGlue(nn.Module):
         if fixed := conf.keys() & set(self.fixed_conf):
             raise KeyError(f"Fixed at construction: {sorted(fixed)}")
         c = SimpleNamespace(**{**vars(self.conf), **conf})
-        if c.rgb8_backend not in (None, "torch"):
-            raise ValueError("rgb8_backend must be None or 'torch'.")
+        if c.rgb8_backend not in (None, "torch", "torch-compile"):
+            raise ValueError("rgb8_backend must be None, 'torch' or 'torch-compile'.")
         if not isinstance(c.rgb8_host_sampling, bool):
             raise ValueError("rgb8_host_sampling must be a bool.")
         if not 0 <= c.n_layers <= self.conf.n_layers:

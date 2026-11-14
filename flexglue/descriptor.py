@@ -222,8 +222,8 @@ class DINOv3Descriptor(nn.Module):
         """
         if not isinstance(host_sampling, bool):
             raise ValueError("host_sampling must be a bool")
-        if backend not in ("torch",):
-            raise ValueError("backend must be 'torch'.")
+        if backend not in ("torch", "torch-compile"):
+            raise ValueError("backend must be 'torch' or 'torch-compile'.")
         if (
             not isinstance(image, np.ndarray)
             or image.dtype != np.uint8
@@ -263,12 +263,14 @@ class DINOv3Descriptor(nn.Module):
             ):
                 table = torch.from_numpy(port.fp32_codebook()).to(device)
                 self._rgb8_codebook = table
+            options = {"compile_conversion": True} if backend == "torch-compile" else {}
             prepared = port.prepare_rgb8(
                 image,
                 target_hw=(512, 512),
                 device=device,
                 codebook_device=table,
                 host_sampling=host_sampling,
+                **options,
             )
             return port.describe_prepared(self, prepared, keypoints=keypoints)
         # CPU, gradients, other layouts/platforms/resizes retain
