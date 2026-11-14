@@ -1,4 +1,5 @@
 """Host lattice selection is an explicit RGB8 opt-in."""
+import importlib.util
 import os
 import unittest
 from unittest.mock import patch
@@ -80,6 +81,9 @@ class HostSamplingPortableTest(PacketAssertions, unittest.TestCase):
 )
 class HostSamplingCudaTest(PacketAssertions, unittest.TestCase):
     def test_default_and_optin_pixels_owners_and_stream(self):
+        from flexglue.utils import rgb8_triton
+
+        self.assertIsNotNone(importlib.util.find_spec("triton"))
         bgr = (
             np.arange(1024 * 2048 * 3, dtype=np.uint32)
             .astype(np.uint8)
@@ -92,7 +96,7 @@ class HostSamplingCudaTest(PacketAssertions, unittest.TestCase):
                 mode="bilinear",
                 align_corners=False,
             )
-            for port in (rgb8_torch,):
+            for port in (rgb8_torch, rgb8_triton):
                 stream = torch.cuda.Stream()
                 with self.subTest(
                     port=port.__name__, strides=image.strides
