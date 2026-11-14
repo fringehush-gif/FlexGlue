@@ -163,6 +163,40 @@ class ExportAllocationTest(unittest.TestCase):
             self.assertEqual(path.read_bytes(), b"original")
             self.assertEqual(list(Path(tmp).iterdir()), [path])
 
+    def test_completed_continuations_are_not_passed_to_if_constructors(self):
+        from onnx import helper
+
+        export = self.export
+        model = fixture_model(payload_elements=1_048_576)
+        constructor_payloads = []
+        original = helper.make_node
+
+        def payload_bytes(graph):
+            total = sum(len(t.raw_data) for t in graph.initializer)
+            for node in graph.node:
+                for attr in node.attribute:
+                    if attr.type == attr.GRAPH:
+                        total += payload_bytes(attr.g)
+            return total
+
+        def make_node(op_type, *args, **kwargs):
+            if op_type == "If":
+                constructor_payloads.append(payload_bytes(kwargs["else_branch"]))
+            return original(op_type, *args, **kwargs)
+
+        with patch.object(helper, "make_node", side_effect=make_node):
+            export._add_early_stopping_model(model, (2, 4), 5)
+        self.assertEqual(constructor_payloads, [0, 0])
+        graph = model.graph
+        for expected in ("weight2", "weight4", "weight_final"):
+            self.assertEqual([t.name for t in graph.initializer], [expected])
+            conditionals = [node for node in graph.node if node.op_type == "If"]
+            if conditionals:
+                graph = next(
+                    a.g for a in conditionals[0].attribute if a.name == "else_branch"
+                )
+        self.assertEqual(len(graph.initializer[0].raw_data), 4_194_304)
+
     def test_path_wrappers_remain_usable(self):
         import onnx
 

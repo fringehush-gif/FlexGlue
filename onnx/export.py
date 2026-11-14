@@ -580,35 +580,30 @@ def _add_early_stopping_model(model, check_layers, n_layers: int):
     stages = stage_node_indices(nodes, [[n] for n in score_names] + [final_names])
     inits = stage_initializers(graph, nodes, stages)
 
-    # Build the nested Ifs from the innermost check to the outermost. The last
-    # stage produces renamed outputs, since the If node around it does.
-    outputs = [f"{n}_full" for n in final_names]
-    stage_nodes = rename_values(
-        [nodes[i] for i in stages[-1]], dict(zip(final_names, outputs))
-    )
-    graph_name = "layers_after_last_check"
-    for c in reversed(range(len(check_layers))):
-        body = helper.make_graph(
-            stage_nodes,
-            graph_name,
-            [],
-            matcher_output_info(outputs),
-            initializer=inits[c + 1],
-        )
-        k = check_layers[c]
-        outputs = (
-            final_names
-            if c == 0
-            else [f"{n}_after_layer{check_layers[c - 1]}" for n in final_names]
-        )
-        stage_nodes = [nodes[i] for i in stages[c]]
-        stage_nodes += early_stop_check(k, n_layers, outputs, body)
-        graph_name = f"layers_after_check{c}"
-
+    # Insert each If with an empty continuation, then populate the actual
+    # else-branch owned by the parent node. This avoids copying completed
+    # nested graphs (and their initializer payload) into outer If nodes.
+    full_outputs = [f"{n}_full" for n in final_names]
+    rename_values([nodes[i] for i in stages[-1]], dict(zip(final_names, full_outputs)))
     del graph.node[:]
-    graph.node.extend(stage_nodes)
+    graph.node.extend(nodes[i] for i in stages[0])
     del graph.initializer[:]
     graph.initializer.extend(inits[0])
+    parent, outputs = graph, final_names
+    for c, k in enumerate(check_layers):
+        last = c == len(check_layers) - 1
+        next_outputs = (
+            full_outputs if last else [f"{n}_after_layer{k}" for n in final_names]
+        )
+        name = "layers_after_last_check" if last else f"layers_after_check{c + 1}"
+        skeleton = helper.make_graph([], name, [], matcher_output_info(next_outputs))
+        parent.node.extend(early_stop_check(k, n_layers, outputs, skeleton))
+        conditional = parent.node[-1]
+        parent = next(a.g for a in conditional.attribute if a.name == "else_branch")
+        parent.node.extend(nodes[i] for i in stages[c + 1])
+        parent.initializer.extend(inits[c + 1])
+        outputs = next_outputs
+
     del graph.output[:]
     graph.output.extend(matcher_output_info(final_names))
     graph.input.append(
