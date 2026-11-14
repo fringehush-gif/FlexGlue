@@ -74,6 +74,32 @@ class ReadoutSelectionTest(unittest.TestCase):
     HAS_TRITON and torch.cuda.is_available(), "CUDA and Triton required"
 )
 class ReadoutCUDATest(unittest.TestCase):
+    def test_lazy_negative_view_delegates_without_launch(self):
+        from flexglue.utils import entmax_triton
+
+        ys = torch._neg_view(torch.full((1, 512), -1.0, device="cuda"))
+        self.assertTrue(ys.is_neg())
+        sentinel, seen = object(), []
+
+        def native(x):
+            seen.append(x)
+            return sentinel
+
+        class NoLaunch:
+            def __getitem__(self, grid):
+                raise AssertionError("unsupported launch")
+
+        with torch.no_grad(), patch.object(entmax_triton, "_threshold", NoLaunch()):
+            self.assertIs(entmax_triton.threshold(ys, native=native), sentinel)
+            self.assertEqual(len(seen), 1)
+            self.assertIs(seen[0], ys)
+            torch.testing.assert_close(
+                entmax_triton.threshold(ys, native=ops.sorted_entmax15_threshold),
+                ops.sorted_entmax15_threshold(ys),
+                rtol=0,
+                atol=0,
+            )
+
     def test_supported_and_fallback_shapes(self):
         from flexglue.utils import entmax_triton
 
