@@ -16,6 +16,15 @@ from flexglue.utils import rgb8_torch
 from flexglue.utils._rgb8 import fp32_codebook, prepare_rgb8
 
 
+def full_resize(source, lut, target_hw, bgr, *, converter):
+    image = converter(source, lut, bgr)
+    if source.shape[:2] != target_hw:
+        image = F.interpolate(
+            image, size=target_hw, mode="bilinear", align_corners=False
+        )
+    return image.contiguous()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--height", type=int, default=2048)
@@ -46,16 +55,11 @@ def main():
             # Reference: compile the full-resolution conversion/layout only.
             convert = torch.compile(rgb8_torch._convert_rgb8, dynamic=True)
 
-            def full_resize(source, lut, target_hw, bgr, converter=convert):
-                image = converter(source, lut, bgr)
-                if source.shape[:2] != target_hw:
-                    image = F.interpolate(
-                        image, size=target_hw, mode="bilinear", align_corners=False
-                    )
-                return image
-
             functions[backend] = functools.partial(
-                prepare_rgb8, rgb, codebook_device=table, resize=full_resize
+                prepare_rgb8,
+                rgb,
+                codebook_device=table,
+                resize=functools.partial(full_resize, converter=convert),
             )
         else:
             functions[backend] = functools.partial(

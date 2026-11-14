@@ -2,11 +2,13 @@
 
 import copy
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
 from flexglue import FlexGlue
+from flexglue.descriptor import DINOv3Descriptor
 from flexglue.refiner import VGG19BN, ConvRefiner, RoMav2Refiner
 from flexglue.utils.modules import TransformerLayer
 
@@ -79,6 +81,37 @@ class CompiledOwnershipTest(unittest.TestCase):
                 rtol=0,
                 atol=0,
             )
+
+    def test_copied_descriptor_uses_copy_parameters_and_dtype(self):
+        descriptor = DINOv3Descriptor.__new__(DINOv3Descriptor)
+        torch.nn.Module.__init__(descriptor)
+        descriptor.conf = SimpleNamespace(resize=(32, 32), describe=False)
+        descriptor.backbone = torch.nn.Conv2d(3, 3, 1)
+        descriptor.head = torch.nn.Identity()
+        descriptor.register_buffer("mean", torch.zeros(3, 1, 1))
+        descriptor.register_buffer("std", torch.ones(3, 1, 1))
+        model = make_matcher()
+        model.descriptor = descriptor
+        compile_for_cpu(model)
+        data = {"image": torch.rand(1, 3, 32, 32)}
+        with torch.no_grad():
+            before = model.descriptor(data)["features"].clone()
+            copied = copy.deepcopy(model)
+            copied.descriptor.backbone.bias.add_(2)
+            expected = DINOv3Descriptor.forward(copied.descriptor, data)["features"]
+            actual = copied.descriptor(data)["features"]
+            self.assertFalse(torch.equal(expected, before))
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            torch.testing.assert_close(model.descriptor(data)["features"], before)
+
+            copied = copy.deepcopy(model).double()
+            double_data = {"image": data["image"].double()}
+            expected = DINOv3Descriptor.forward(copied.descriptor, double_data)[
+                "features"
+            ]
+            actual = copied.descriptor(double_data)["features"]
+            self.assertEqual(actual.dtype, torch.float64)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_copied_transformer_uses_copy_parameters(self):
         model = compile_for_cpu(make_matcher())

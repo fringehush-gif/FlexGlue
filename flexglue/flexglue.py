@@ -216,15 +216,29 @@ class FlexGlue(nn.Module):
         if detector is not None:
             byte_inputs = any(isinstance(d["image"], np.ndarray) for d in data)
             state = None
+            floating_state = None
             if byte_inputs and isinstance(detector, nn.Module):
                 state = next(chain(detector.parameters(), detector.buffers()), None)
+                floating_state = next(
+                    (
+                        value
+                        for value in chain(detector.parameters(), detector.buffers())
+                        if value.is_floating_point()
+                    ),
+                    None,
+                )
             device = state.device if state is not None else "cpu"
+            dtype = (
+                floating_state.dtype if floating_state is not None else torch.float32
+            )
             matcher_device = next(self.parameters()).device if byte_inputs else None
             for data_i in data:
                 images = data_i["image"]
                 byte_input = isinstance(images, np.ndarray)
                 if byte_input:
-                    images = pp.numpy_image_to_torch(images)[None].to(device)
+                    images = pp.numpy_image_to_torch(images)[None].to(
+                        device=device, dtype=dtype
+                    )
                 feats = [detector.extract(im) for im in images]
                 if len({f["keypoints"].shape[1] for f in feats}) > 1:
                     raise ValueError(
