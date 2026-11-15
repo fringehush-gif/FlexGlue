@@ -85,7 +85,7 @@ class ReadoutCUDATest(unittest.TestCase):
                 launches.append(grid)
                 return kernel[grid]
 
-        grid = ops.cell_centers(16, 32, scale=(16, 32), device="cuda")
+        grid = ops.cell_centers(16, 32, scale=(32, 16), device="cuda")
         logits = torch.randn(1, 2, 512, device="cuda")
         with torch.no_grad():
             expected = ops.entmax15_window_readout(logits, grid, (16, 32))
