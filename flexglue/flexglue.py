@@ -338,6 +338,10 @@ class FlexGlue(nn.Module):
                 detected = {k: torch.cat([f[k] for f in feats]) for k in feats[0]}
                 if byte_input:
                     detected = {k: v.to(matcher_device) for k, v in detected.items()}
+                    # Matcher feature sampling uses FP32 geometry.
+                    for key in ("keypoints", "image_size"):
+                        if key in detected and detected[key].is_floating_point():
+                            detected[key] = detected[key].float()
                 data_i.update(detected)
         return self.match(*data, sparse=sparse, **conf)
 
