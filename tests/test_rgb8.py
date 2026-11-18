@@ -363,7 +363,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
     def test_default_rgb8_is_eager_torch_without_triton(self):
         matcher = tiny_matcher()
         conf = matcher.resolve_conf({"describe": True})
-        for backend in (None,):
+        for backend in (None, "torch-compile"):
             self.assertEqual(
                 matcher.resolve_conf({"rgb8_backend": backend}).rgb8_backend, backend
             )
@@ -543,7 +543,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
                 (False, True),
                 (True, True),
             ):
-                for backend in (None, "torch"):
+                for backend in (None, "torch", "torch-compile"):
                     with self.subTest(
                         descriptor=descriptor_present, fine=fine_cache, backend=backend
                     ), torch.no_grad():
@@ -611,7 +611,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
             )
             with override, torch.inference_mode():
                 expected = descriptor({"image": numpy_image_to_torch(rgb).cuda()})
-                for backend in ("torch",):
+                for backend in ("torch", "torch-compile"):
                     with self.subTest(kind=kind, backend=backend), patch.object(
                         rgb8_torch,
                         "prepare_rgb8",

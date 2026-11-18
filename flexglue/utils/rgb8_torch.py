@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
-"""RGB8 conversion in eager Torch."""
+"""RGB8 conversion in Torch, with optional compilation of conversion/layout."""
+from functools import lru_cache, partial
 from typing import Optional, Union
 
 import numpy as np
@@ -28,8 +29,14 @@ def _convert_rgb8(source, table, source_is_bgr, target_hw=None):
     return image.flip(1) if source_is_bgr else image
 
 
-def _resize_rgb8(source, table, target_hw, source_is_bgr):
-    image = _convert_rgb8(source, table, source_is_bgr, target_hw)
+@lru_cache(maxsize=1)
+def _compiled_converter():
+    return torch.compile(_convert_rgb8, dynamic=True)
+
+
+def _resize_rgb8(source, table, target_hw, source_is_bgr, compile_conversion=False):
+    convert = _compiled_converter() if compile_conversion else _convert_rgb8
+    image = convert(source, table, source_is_bgr, target_hw)
     if source.shape[:2] != target_hw:
         image = F.interpolate(
             image, size=target_hw, mode="bilinear", align_corners=False
@@ -46,6 +53,7 @@ def prepare_rgb8(
     device: Union[torch.device, str] = "cuda",
     codebook_device: Optional[torch.Tensor] = None,
     host_sampling: bool = False,
+    compile_conversion: bool = False,
 ) -> PreparedDescriptorInput:
     return _prepare_rgb8(
         rgb,
@@ -53,5 +61,5 @@ def prepare_rgb8(
         device=device,
         codebook_device=codebook_device,
         host_sampling=host_sampling,
-        resize=_resize_rgb8,
+        resize=partial(_resize_rgb8, compile_conversion=compile_conversion),
     )
