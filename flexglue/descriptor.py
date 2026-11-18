@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 from typing import Optional
 
@@ -222,8 +223,8 @@ class DINOv3Descriptor(nn.Module):
         """
         if not isinstance(host_sampling, bool):
             raise ValueError("host_sampling must be a bool")
-        if backend not in ("torch", "torch-compile"):
-            raise ValueError("backend must be 'torch' or 'torch-compile'.")
+        if backend not in ("torch", "torch-compile", "triton"):
+            raise ValueError("backend must be 'torch', 'torch-compile' or 'triton'.")
         if (
             not isinstance(image, np.ndarray)
             or image.dtype != np.uint8
@@ -244,6 +245,7 @@ class DINOv3Descriptor(nn.Module):
             and 1 <= image.shape[1] <= 65535
             and image.shape[0] * image.shape[1] <= 64_000_000
             and device.type == "cuda"
+            and (backend != "triton" or sys.platform.startswith("linux"))
             and not self.training
             and not torch.is_grad_enabled()
             and not torch.are_deterministic_algorithms_enabled()
@@ -251,7 +253,14 @@ class DINOv3Descriptor(nn.Module):
         )
         port = None
         if supported:
-            from .utils import rgb8_torch as port
+            if backend == "triton":
+                try:
+                    from .utils import rgb8_triton as port
+                except ModuleNotFoundError as error:
+                    if error.name != "triton":
+                        raise
+            else:
+                from .utils import rgb8_torch as port
         if port is not None:
             table = self._rgb8_codebook
             if (
@@ -273,7 +282,7 @@ class DINOv3Descriptor(nn.Module):
                 **options,
             )
             return port.describe_prepared(self, prepared, keypoints=keypoints)
-        # CPU, gradients, other layouts/platforms/resizes retain
+        # CPU, gradients, other layouts/platforms/resizes or absent Triton retain
         # the original normalization, interpolation and descriptor forward path.
         tensor = self.rgb8_to_tensor(image)
         data = {"image": tensor}

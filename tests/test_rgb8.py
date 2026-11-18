@@ -6,7 +6,9 @@ Optional Linux CUDA checks: set FLEXGLUE_TEST_RGB8_CUDA=1 explicitly.
 import builtins
 import copy
 import functools
+import importlib.util
 import os
+import sys
 import unittest
 from contextlib import contextmanager, nullcontext
 from unittest.mock import patch
@@ -363,7 +365,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
     def test_default_rgb8_is_eager_torch_without_triton(self):
         matcher = tiny_matcher()
         conf = matcher.resolve_conf({"describe": True})
-        for backend in (None, "torch-compile"):
+        for backend in (None, "torch-compile", "triton"):
             self.assertEqual(
                 matcher.resolve_conf({"rgb8_backend": backend}).rgb8_backend, backend
             )
@@ -470,7 +472,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
         with forbid_triton(), torch.no_grad():
             reference, rng = run([{"image": tensor} for tensor in tensors])
             actual, actual_rng = run(
-                [{"image": image} for image in images], rgb8_backend="torch"
+                [{"image": image} for image in images], rgb8_backend="triton"
             )
             self.assertEqual(len(reference), 16)
             self.assertPacketEqual(reference, actual)
@@ -497,7 +499,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
             candidate = matcher.match(
                 *packets,
                 describe=False,
-                rgb8_backend="torch",
+                rgb8_backend="triton",
                 max_num_samples=4,
                 min_covisibility=0.0,
                 early_stop_decay=None,
@@ -507,7 +509,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
     def test_refiner_description_retains_torch_image(self):
         matcher = tiny_matcher()
         conf = matcher.resolve_conf(
-            {"describe": True, "describe_resize": (32, 32), "rgb8_backend": "torch"}
+            {"describe": True, "describe_resize": (32, 32), "rgb8_backend": "triton"}
         )
         conf.refine = True  # routing only; no refiner weights or downloads
         with forbid_triton(), torch.no_grad():
@@ -543,7 +545,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
                 (False, True),
                 (True, True),
             ):
-                for backend in (None, "torch", "torch-compile"):
+                for backend in (None, "torch", "torch-compile", "triton"):
                     with self.subTest(
                         descriptor=descriptor_present, fine=fine_cache, backend=backend
                     ), torch.no_grad():
@@ -583,8 +585,71 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
     "set FLEXGLUE_TEST_RGB8_CUDA=1 for optional Linux CUDA checks",
 )
 class RGB8CudaTest(PacketAssertions, unittest.TestCase):
+    def test_lazy_negative_codebook_on_side_stream(self):
+        from flexglue.utils import _rgb8, rgb8_triton
+
+        rgb = np.zeros((512, 512, 3), dtype=np.uint8)
+        side = torch.cuda.Stream()
+        events = []
+        record, resolve = torch.Tensor.record_stream, torch.Tensor.resolve_neg
+
+        def recording(x, stream):
+            events.append(("record", x, stream.cuda_stream))
+            return record(x, stream)
+
+        def resolving(x):
+            events.append(
+                ("resolve", x, torch.cuda.current_stream(x.device).cuda_stream)
+            )
+            return resolve(x)
+
+        def lookup(source, table, target_hw, source_is_bgr):
+            return table[source.long()].permute(2, 0, 1).unsqueeze(0).contiguous()
+
+        with torch.inference_mode(), torch.cuda.stream(side):
+            table = torch._neg_view(torch.full((256,), -1.0, device="cuda"))
+            plain = torch.ones(256, device="cuda")
+            bad = torch._neg_view(torch.ones(255, device="cuda"))
+            self.assertTrue(table.is_neg())
+            with patch.object(torch.Tensor, "record_stream", recording), patch.object(
+                torch.Tensor, "resolve_neg", resolving
+            ):
+                fused = rgb8_triton.prepare_rgb8(rgb, codebook_device=table)
+                ordinary = rgb8_triton.prepare_rgb8(rgb, codebook_device=plain)
+                with self.assertRaisesRegex(ValueError, "caller-owned codebook"):
+                    _rgb8.prepare_rgb8(rgb, codebook_device=bad, resize=lookup)
+            native = _rgb8.prepare_rgb8(rgb, codebook_device=table, resize=lookup)
+            resolved = fused.owners[-1]
+            self.assertIsNot(resolved, table)
+            self.assertFalse(resolved.is_neg())
+            self.assertIs(ordinary.owners[-1], plain)
+            self.assertEqual(
+                [(kind, stream) for kind, t, stream in events if t is table],
+                [("record", side.cuda_stream), ("resolve", side.cuda_stream)],
+            )
+            self.assertTrue(
+                any(
+                    kind == "record" and t is resolved and stream == side.cuda_stream
+                    for kind, t, stream in events
+                )
+            )
+            self.assertFalse(
+                any(
+                    kind == "resolve" and (t is plain or t is bad)
+                    for kind, t, _ in events
+                )
+            )
+            fused.require_current_stream()
+            side.synchronize()
+            for prepared in (fused, ordinary, native):
+                torch.testing.assert_close(
+                    prepared.tensor, torch.ones_like(prepared.tensor), rtol=0, atol=0
+                )
+        with self.assertRaisesRegex(RuntimeError, "producer stream"):
+            fused.require_current_stream()
+
     def test_custom_preprocess_uses_original_pixels(self):
-        from flexglue.utils import rgb8_torch
+        from flexglue.utils import rgb8_torch, rgb8_triton
 
         stock_preprocess = DINOv3Descriptor.preprocess
 
@@ -611,9 +676,13 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
             )
             with override, torch.inference_mode():
                 expected = descriptor({"image": numpy_image_to_torch(rgb).cuda()})
-                for backend in ("torch", "torch-compile"):
+                for backend in ("torch", "torch-compile", "triton"):
                     with self.subTest(kind=kind, backend=backend), patch.object(
                         rgb8_torch,
+                        "prepare_rgb8",
+                        side_effect=AssertionError("fast path"),
+                    ), patch.object(
+                        rgb8_triton,
                         "prepare_rgb8",
                         side_effect=AssertionError("fast path"),
                     ):
@@ -623,12 +692,14 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                     self.assertIsNone(descriptor._rgb8_codebook)
 
     def setUp(self):
-        if not torch.cuda.is_available():
-            self.skipTest("CUDA is unavailable")
+        if not sys.platform.startswith("linux") or not torch.cuda.is_available():
+            self.skipTest("Linux CUDA is required for the optional Triton path")
+        if importlib.util.find_spec("triton") is None:
+            self.skipTest("optional Triton is not installed")
         self.descriptor = tiny_descriptor((512, 512)).cuda()
 
     def test_accelerated_pixels_features_and_original_size(self):
-        from flexglue.utils import rgb8_torch
+        from flexglue.utils import rgb8_triton
 
         for height, width in ((512, 512), (513, 769)):
             self.descriptor = tiny_descriptor((512, 512)).cuda()
@@ -641,7 +712,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 image = numpy_image_to_torch(rgb).cuda()
                 expected_pixels = self.descriptor.preprocess(image, (512, 512))
                 actual = self.descriptor.describe_rgb8(rgb)
-                prepared = rgb8_torch.prepare_rgb8(
+                prepared = rgb8_triton.prepare_rgb8(
                     rgb,
                     codebook_device=self.descriptor._rgb8_codebook,
                 )
@@ -650,7 +721,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 torch.cuda.synchronize()
 
     def test_accelerated_module_dtype_follows_tensor_reference(self):
-        from flexglue.utils import rgb8_torch
+        from flexglue.utils import rgb8_triton
 
         rgb = np.arange(512 * 512 * 3, dtype=np.uint32).astype(np.uint8)
         rgb = rgb.reshape(512, 512, 3)
@@ -661,9 +732,9 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 self.descriptor.to(dtype=dtype)
                 expected = self.descriptor.describe(tensor.to(dtype=dtype))
                 with patch.object(
-                    rgb8_torch, "prepare_rgb8", wraps=rgb8_torch.prepare_rgb8
+                    rgb8_triton, "prepare_rgb8", wraps=rgb8_triton.prepare_rgb8
                 ) as prepare:
-                    actual = self.descriptor.describe_rgb8(rgb, backend="torch")
+                    actual = self.descriptor.describe_rgb8(rgb, backend="triton")
                 if dtype == torch.float32:
                     prepare.assert_called_once()
                 else:
@@ -753,7 +824,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
         tensor = numpy_image_to_torch(rgb).cuda()
         with torch.inference_mode():
             expected = descriptor.describe(tensor, resize=(512, 512))
-            for backend in ("torch",):
+            for backend in ("torch", "triton"):
                 with self.subTest(backend=backend):
                     actual = descriptor.describe_rgb8(
                         rgb, resize=(512, 512), backend=backend
@@ -763,7 +834,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                     self.assertPacketEqual(expected["image_size"], actual["image_size"])
 
     def test_descriptor_compilation_covers_both_input_routes(self):
-        from flexglue.utils import rgb8_torch
+        from flexglue.utils import rgb8_triton
 
         matcher = tiny_matcher().cuda()
         descriptor = matcher.descriptor
@@ -805,9 +876,9 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
             tensor_compiled = compiled_encoding
             compiled_encoding = False
             with patch.object(
-                rgb8_torch, "prepare_rgb8", wraps=rgb8_torch.prepare_rgb8
+                rgb8_triton, "prepare_rgb8", wraps=rgb8_triton.prepare_rgb8
             ) as prepare:
-                descriptor.describe_rgb8(rgb, backend="torch")
+                descriptor.describe_rgb8(rgb, backend="triton")
             prepare.assert_called_once()
             # Both routes must enter the shared compiled tensor forward.
             self.assertTrue(tensor_compiled)
@@ -828,7 +899,7 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 self.assertPacketEqual(first, saved)
 
     def test_disabled_sparse_description_preserves_keypoints(self):
-        from flexglue.utils import rgb8_torch
+        from flexglue.utils import rgb8_triton
 
         self.descriptor.conf.describe = False
         rgb = np.arange(512 * 512 * 3, dtype=np.uint32).astype(np.uint8)
@@ -837,17 +908,17 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
         with torch.inference_mode(), patch.object(
             self.descriptor, "sample_descriptors", side_effect=AssertionError("sampled")
         ), patch.object(
-            rgb8_torch, "prepare_rgb8", wraps=rgb8_torch.prepare_rgb8
+            rgb8_triton, "prepare_rgb8", wraps=rgb8_triton.prepare_rgb8
         ) as prepare:
             image = numpy_image_to_torch(rgb).cuda()
             expected = self.descriptor({"image": image, "keypoints": keypoints})
             expected["keypoints"] = keypoints
-            actual = self.descriptor.describe_rgb8(rgb, keypoints, backend="torch")
+            actual = self.descriptor.describe_rgb8(rgb, keypoints, backend="triton")
             prepare.assert_called_once()
             self.assertPacketEqual(expected, actual)
 
     def test_deterministic_mode_uses_reference_preprocess(self):
-        from flexglue.utils import rgb8_torch
+        from flexglue.utils import rgb8_triton
 
         previous = torch.are_deterministic_algorithms_enabled()
         warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
@@ -857,11 +928,11 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
             rgb = np.arange(513 * 769 * 3, dtype=np.uint32).astype(np.uint8)
             rgb = rgb.reshape(513, 769, 3)[:, :, ::-1]
             with torch.inference_mode(), patch.object(
-                rgb8_torch, "prepare_rgb8", side_effect=AssertionError("fast path")
+                rgb8_triton, "prepare_rgb8", side_effect=AssertionError("fast path")
             ):
                 image = numpy_image_to_torch(rgb).cuda()
                 expected = descriptor({"image": image})
-                actual = descriptor.describe_rgb8(rgb, backend="torch")
+                actual = descriptor.describe_rgb8(rgb, backend="triton")
                 self.assertPacketEqual(expected, actual)
                 self.assertIsNone(descriptor._rgb8_codebook)
         finally:

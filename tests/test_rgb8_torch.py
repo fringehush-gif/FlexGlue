@@ -229,7 +229,7 @@ class TorchRGB8PortableTest(PacketAssertions, unittest.TestCase):
         tensor = numpy_image_to_torch(image)
         with forbid_triton(), torch.no_grad():
             expected = matcher.descriptor({"image": tensor})
-            for backend in ("torch", "torch-compile"):
+            for backend in ("torch", "torch-compile", "triton"):
                 with self.subTest(backend=backend), patch.object(
                     rgb8_torch,
                     "prepare_rgb8",
