@@ -495,18 +495,14 @@ class FlexGlue(nn.Module):
             valid &= ops.inside_border(dense_p2di_ri, size_i, border)
             valid &= ops.inside_border(dense_p2di_rj, size_j, border)
             if conf.max_distance_px:
-                dense_j = {
-                    "dense_p2di_nj": pred[f"dense_p2d{j}_n{i}"],
-                    "dense_confidencei": pred[f"dense_confidence{j}"],
-                }
-                err = self.cycle_error(
-                    context,
-                    i,
-                    dense_p2di_ni.flatten(1, 2),
+                # Dense gating only consumes the round-trip location.
+                back_ni = ops.sample_features(
+                    ops.to_chw(pred[f"dense_p2d{j}_n{i}"]),
                     dense_p2di_nj.flatten(1, 2),
-                    size_i,
-                    dense_j,
-                )[0]
+                )
+                back_ri = ops.denormalize_keypoints(back_ni, size_i)
+                err = (back_ri - dense_p2di_ri.flatten(1, 2)).norm(dim=-1)
+                del back_ni, back_ri
                 valid &= err.view_as(dense_confidence) < conf.max_distance_px
             pred[f"dense_valid{i}"] = valid
             pred[f"dense_confidence{i}"] = torch.where(valid, dense_confidence, 0)
