@@ -33,11 +33,12 @@ def denormalize_keypoints(kpts: torch.Tensor, size: torch.Tensor) -> torch.Tenso
 
 def cell_centers(h: int, w: int, scale: tuple, device=None) -> torch.Tensor:
     """Normalized (x, y) centers (h*w, 2) of an h x w grid, divided by (sx, sy)."""
-    y, x = torch.meshgrid(
-        torch.arange(h, device=device), torch.arange(w, device=device), indexing="ij"
-    )
-    xy = torch.stack([(x + 0.5) / scale[0], (y + 0.5) / scale[1]], -1)
-    return xy.flatten(0, 1) * 2 - 1
+    # Normalize the one-dimensional axes before expanding them into a grid.
+    axis = torch.arange(h + w, device=device) + 0.5
+    xy = torch.cat([axis[:w] / scale[0], axis[:h] / scale[1]]) * 2 - 1
+    x, y = xy.split((w, h))
+    y, x = torch.meshgrid(y, x, indexing="ij")
+    return torch.stack([x, y], -1).flatten(0, 1)
 
 
 def to_hwc(x: torch.Tensor) -> torch.Tensor:
