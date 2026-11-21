@@ -34,7 +34,10 @@ def local_correlation(
     window = torch.stack([dx, dy], -1).reshape(-1, 2)
     coords = (warp[..., None, :] + window).reshape(b, h, -1, 2)
     f1w = F.grid_sample(f1, coords, align_corners=False).reshape(b, c, h, w, -1)
-    return ops.to_chw((f0[..., None] / c**0.5 * f1w).sum(1))
+    del coords
+    f0 = f0[..., None] / c**0.5
+    f1w = f1w.to(torch.promote_types(f0.dtype, f1w.dtype))
+    return ops.to_chw(f1w.mul_(f0).sum(1))
 
 
 class VGG19BN(nn.Module):
@@ -150,6 +153,7 @@ class ConvRefiner(nn.Module):
         x = [ops.to_chw(f_i), f_ji, self.disp_emb(displacement)]
         if self.radius is not None:
             x.append(local_correlation(x[0], ops.to_chw(f_j), warp, self.radius))
+        del f_j
         z = self.hidden_blocks(self.block1(torch.cat(x, 1))).float()
         delta = ops.to_hwc(self.warp_head(z))
         d = ops.to_hwc(self.confidence_head(z))
@@ -163,8 +167,9 @@ class ConvRefiner(nn.Module):
             F.softplus(d[..., 3]) + 1e-6,
         )
         d = torch.stack([d[..., 0], l00 * l00, l00 * l10, l10 * l10 + l11 * l11], -1)
-        mlogit_i = F.pad(mlogit_i, (0, 4 - mlogit_i.shape[-1])) + d
-        return warp, mlogit_i
+        if mlogit_i.shape[-1] != 4:
+            mlogit_i = F.pad(mlogit_i, (0, 4 - mlogit_i.shape[-1]))
+        return warp, mlogit_i + d
 
 
 class RoMav2Refiner(nn.Module):
