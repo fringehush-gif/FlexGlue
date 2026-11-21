@@ -1,0 +1,30 @@
+{
+  "readout_bf16.pt": {
+    "sha256": "524a5aa6d202da43aaf47d0a614b54e2ff9d9583861025fb555253c7ac103322",
+    "size_bytes": 1839042,
+    "contents": "Generated MatchHead state_dict and three CPU FP32 input tensors; no pretrained weights or user images.",
+    "origin": "Recovered fourth BF16 case from round11 readout qualification; round12 froze the original bytes.",
+    "original_seed": 111079,
+    "original_native_pr22": "57c6118eca43c03c76229e6ad097587855dfb934",
+    "input_shapes": [
+      [
+        2,
+        7,
+        2
+      ],
+      [
+        2,
+        16,
+        17,
+        31
+      ],
+      [
+        2,
+        16,
+        17,
+        31
+      ]
+    ],
+    "purpose": "Replay the exact actual-head fixture independently of device RNG or later Torch initialization behavior."
+  }
+}
