@@ -98,6 +98,7 @@ class SelfBlock(nn.Module):
         encoding = encoding.transpose(-3, -2)  # broadcast over (N, H) instead of (H, N)
         q, k = apply_rotary(encoding, q), apply_rotary(encoding, k)
         message = self.out_proj(attention(q, k, v.contiguous()))
+        del qkv, q, k, v  # Attention inputs are finished before the FFN.
         return x + self.ffn(torch.cat([x, self.message_norm(message)], -1))
 
 
@@ -122,7 +123,9 @@ class CrossBlock(nn.Module):
         qk0, qk1 = self.qk_norm(qk0).to(v0.dtype), self.qk_norm(qk1).to(v1.dtype)
         m0 = self.to_out(attention(qk0, qk1, v1))
         m1 = self.to_out(attention(qk1, qk0, v0))
+        del qk0, qk1, v0, v1  # Both attention directions are complete.
         x0 = x0 + self.ffn(torch.cat([x0, self.message_norm(m0)], -1))
+        del m0
         x1 = x1 + self.ffn(torch.cat([x1, self.message_norm(m1)], -1))
         return x0, x1
 
