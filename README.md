@@ -288,9 +288,15 @@ Batching has a few requirements:
 - ```refine```: Refine with RoMa v2 refiners (needs ```image``` or compatible ```fine_features``` in each input). Default: False.
 - ```refine_resize```: Input size of the refiners, as ```resize``` above. Default: (512, 512).
 - ```refine_scales```: Refiner strides, coarse to fine, fixed at construction. Default: (2, 1).
+- ```refine_correlation```: Optional eager CUDA correlation backend: ```"torch"``` or ```"triton"```. Fixed at construction; default: ```"torch"```.
 - ```refine_selected_features```: Extract only the configured strides plus stride 1. Default: False. Evaluation can skip unused later stages; training still runs the full backbone.
 
 </details>
+
+The optional `refine_correlation="triton"` backend fuses eager CUDA local
+correlation without materializing sampled features and requires Triton. Unsupported
+shapes, layouts, dtypes, gradients and externally compiled refinement use native
+Torch correlation. The default `"torch"` backend adds no dependency.
 
 Selected extraction can skip hooks on unused later layers. Custom `extract`
 overrides still run in full and are filtered to the required strides. Custom
