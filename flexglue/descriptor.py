@@ -134,7 +134,14 @@ class DINOv3Descriptor(nn.Module):
         x = self.preprocess(data["image"], resize)
         pred = {
             "features": self.encode(x),
-            "image_size": pp.image_sizes(data["image"]).to(x),
+            "image_size": pp.image_sizes(data["image"]).to(
+                device=x.device,
+                dtype=(
+                    torch.int64
+                    if x.dtype in (torch.float16, torch.bfloat16)
+                    else x.dtype
+                ),
+            ),
         }
         if self.conf.describe and "keypoints" in data:
             pred["descriptors"] = self.sample_descriptors(
