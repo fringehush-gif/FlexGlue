@@ -24,11 +24,15 @@ def batch_images(images: Images) -> List[torch.Tensor]:
 
 def image_sizes(images: Images) -> torch.Tensor:
     """Sizes (w, h) of the images, B x 2."""
-    sizes = [  # new_full fills on device, a tensor from a list would sync
-        torch.stack([im.new_full((len(im),), s) for s in im.shape[-2:][::-1]], -1)
-        for im in batch_images(images)
-    ]
-    return torch.cat(sizes)
+    sizes = []
+    for im in batch_images(images):
+        dtype = im.dtype
+        if dtype in (torch.float16, torch.bfloat16):
+            dtype = torch.int64  # Pixel precision must not round dimensions.
+        # Scalar fills stay on device, without a host tensor transfer.
+        wh = [im.new_full((len(im),), s, dtype=dtype) for s in im.shape[-2:][::-1]]
+        sizes.append(torch.stack(wh, -1))
+    return sizes[0] if len(sizes) == 1 else torch.cat(sizes)
 
 
 def resize_images(
