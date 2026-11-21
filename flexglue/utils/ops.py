@@ -64,10 +64,12 @@ def sorted_entmax15_threshold(ys: torch.Tensor) -> torch.Tensor:
         ys = ys.float()
     rho = torch.arange(1, ys.shape[-1] + 1, device=ys.device, dtype=ys.dtype)
     mean = ys.cumsum(-1) / rho
-    mean_sq = ys.square().cumsum(-1) / rho
-    tau = mean - ((1 - rho * (mean_sq - mean.square())) / rho).clamp_min(0).sqrt()
-    support = (tau <= ys).sum(-1, keepdim=True)
-    return tau.gather(-1, support - 1)
+    delta = (ys.square().cumsum(-1) / rho).sub_(mean.square()).mul_(rho)
+    delta = (1 - delta).div_(rho).clamp_min_(0)
+    tau = mean - delta.sqrt()
+    index = (tau <= ys).sum(-1, keepdim=True) - 1
+    # Differentiate the selected root, excluding inactive zero roots.
+    return mean.gather(-1, index) - delta.gather(-1, index).sqrt()
 
 
 def entmax15_threshold(
@@ -98,7 +100,8 @@ def entmax15_window_readout(
     low_precision = logits.dtype in (torch.float16, torch.bfloat16)
     if logits.shape[-1] > k:  # maximum and threshold from the same (sorted) top-k
         topv, topi = logits.topk(k, dim=-1)
-        vmax, idx = topv[..., :1], topi[..., :1]
+        vmax, idx = topv[..., :1], topi[..., :1].clone()
+        del topi  # Keep one index per query, not the full top-k index storage.
         values = topv.float() if low_precision else topv
         max_value = vmax.float() if low_precision else vmax
         tau = sorted_entmax15_threshold((values - max_value) / 2)
