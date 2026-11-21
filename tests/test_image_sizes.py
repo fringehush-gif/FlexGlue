@@ -24,7 +24,9 @@ class ImageSizesTest(unittest.TestCase):
 
                 descriptor = DINOv3Descriptor.__new__(DINOv3Descriptor)
                 torch.nn.Module.__init__(descriptor)
-                descriptor.conf = SimpleNamespace(resize=(32, 32), describe=False)
+                descriptor.conf = SimpleNamespace(
+                    resize=(32, 32), describe=False, mp=None
+                )
                 descriptor.backbone = torch.nn.Identity()
                 descriptor.head = torch.nn.Identity()
                 descriptor.register_buffer("mean", torch.zeros(3, 1, 1))
