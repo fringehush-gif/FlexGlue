@@ -40,7 +40,7 @@ def resize_images(
     ]
     if len({tuple(im.shape[-2:]) for im in resized}) > 1:
         raise ValueError("Images of different sizes need a (h, w) resize to batch.")
-    return torch.cat(resized)
+    return resized[0] if len(resized) == 1 else torch.cat(resized)
 
 
 def check_resize(resize: Resize, edge_divisible_by: Optional[int] = None) -> Resize:
