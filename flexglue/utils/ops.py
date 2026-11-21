@@ -63,9 +63,12 @@ def sorted_entmax15_threshold(ys: torch.Tensor) -> torch.Tensor:
     rho = torch.arange(1, ys.shape[-1] + 1, device=ys.device, dtype=ys.dtype)
     mean = ys.cumsum(-1) / rho
     mean_sq = ys.square().cumsum(-1) / rho
-    tau = mean - ((1 - rho * (mean_sq - mean.square())) / rho).clamp_min(0).sqrt()
-    support = (tau <= ys).sum(-1, keepdim=True)
-    return tau.gather(-1, support - 1)
+    delta = ((1 - rho * (mean_sq - mean.square())) / rho).clamp_min(0)
+    del mean_sq
+    tau = mean - delta.sqrt()
+    index = (tau <= ys).sum(-1, keepdim=True) - 1
+    # Differentiate the selected root, excluding inactive zero roots.
+    return mean.gather(-1, index) - delta.gather(-1, index).sqrt()
 
 
 def entmax15_threshold(
