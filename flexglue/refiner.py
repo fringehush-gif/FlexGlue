@@ -153,8 +153,10 @@ class ConvRefiner(nn.Module):
         x = [ops.to_chw(f_i), f_ji, self.disp_emb(displacement)]
         if self.radius is not None:
             x.append(local_correlation(x[0], ops.to_chw(f_j), warp, self.radius))
-        del f_j
-        z = self.hidden_blocks(self.block1(torch.cat(x, 1))).float()
+        x = torch.cat(x, 1)
+        del f_i, f_j, f_ji
+        x = self.block1(x)
+        z = self.hidden_blocks(x).float()
         delta = ops.to_hwc(self.warp_head(z))
         d = ops.to_hwc(self.confidence_head(z))
         warp = warp + torch.stack(
