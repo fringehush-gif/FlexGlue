@@ -52,10 +52,7 @@ def tiny_descriptor(resize=(32, 32), descriptor_cls=DINOv3Descriptor):
     }
     with patch("flexglue.descriptor.ConvNeXt", TinyStride8Backbone), patch(
         "flexglue.descriptor.LinearConvHead", TinyHead
-    ), patch(
-        "flexglue.descriptor.ops.load_state_dict",
-        return_value={k.removeprefix("extractor."): v for k, v in state.items()},
-    ):
+    ), patch("torch.hub.load_state_dict_from_url", return_value=state):
         return descriptor_cls(weights="unused", resize=resize).eval()
 
 
