@@ -11,6 +11,7 @@ import importlib
 import importlib.util
 import json
 import math
+import os
 import platform
 import subprocess
 import sys
@@ -54,6 +55,16 @@ PROFILES = {
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def require_compilation(function):
+    def wrapped(*args, **kwargs):
+        assert (
+            torch.compiler.is_compiling()
+        ), "Required consumer ran without compilation"
+        return function(*args, **kwargs)
+
+    return wrapped
 
 
 def map_tensors(value, function):
@@ -430,14 +441,17 @@ def refiner(args):
     fused_consumers = []
     tests = []
     if args.device == "cuda":
-        tests.append(
-            maintained(
-                args.repo,
-                "test_refiner_features.py",
-                "SelectedFeaturesTest."
-                "test_owned_compiled_features_survive_pair_generations",
+        with patch.object(
+            module.VGG19BN, "forward", require_compilation(module.VGG19BN.forward)
+        ):
+            tests.append(
+                maintained(
+                    args.repo,
+                    "test_refiner_features.py",
+                    "SelectedFeaturesTest."
+                    "test_owned_compiled_features_survive_pair_generations",
+                )
             )
-        )
         if args.triton:
             from flexglue.utils import correlation_triton
 
@@ -555,7 +569,12 @@ def covariance(args):
         # CPU mode checks Dynamo capture only, never CUDA qualification.
         backend = "inductor" if args.device == "cuda" else "eager"
         phases.append(
-            ("compiled", torch.compile(execute, backend=backend, fullgraph=True))
+            (
+                "compiled",
+                torch.compile(
+                    require_compilation(execute), backend=backend, fullgraph=True
+                ),
+            )
         )
     factors = [raw[..., 1:] for raw in raw_fields]
     for factor in factors:
@@ -659,6 +678,10 @@ def main():
             raise RuntimeError(
                 "Do not run qualification with Python -O; assertions are required"
             )
+        if args.device == "cuda" and triton_required:
+            assert (
+                os.environ.get("TRITON_INTERPRET") != "1"
+            ), "Triton interpreter mode cannot qualify CUDA kernels"
         assert (args.repo / "flexglue").is_dir(), "Target source checkout is missing"
         proc = subprocess.run(
             ["git", "-C", str(args.repo), "rev-parse", "HEAD"],

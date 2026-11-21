@@ -15,6 +15,10 @@ directory, and the current PR bodies. No earlier artifact archive is required.
   that optimization, not an additional gain over #12.
 - **#27 → #31 → #32 → #33** now has repaired ancestry. These merges preserve each
   tree exactly; they reconcile repeated test commits, not new runtime changes.
+- **#17 → #44** now explicitly stacks the distance-bound fix and dense-cycle
+  optimization. Its regression exercises real geometry rather than a helper mock.
+- Existing upstream **#29** now matches fork **#27** after removing an unused
+  export helper and fixture setting.
 - Fork `main` remains a separate, older integration line. **#21/#34/#35/#37** retain
   main-target CI/backport work. **#45** remains a small independent entmax
   correctness proposal overlapping the readout family. Do not apply it twice.
@@ -92,13 +96,15 @@ done
 
 CUDA is the default. Required backend tests must execute without skips. Missing
 CUDA/Triton, wrong source or dirty executable code does not count as qualification.
+Compiled-consumer checks require active Torch compilation, with Triton's CPU
+interpreter disabled for CUDA/Triton profiles.
 `--device cpu` is a harness smoke check only and cannot clear a GPU label. Read
 the JSON and log, not only the process exit code. A CPU smoke can exit successfully.
 
 Share common checks within a family only after establishing source equivalence.
 Keep results for #22, #23 and #24 separately attributable: #24 inherits FP32
 promotion and cannot qualify #22's unpromoted BF16 arithmetic. Current complete
-stacks are **#22 → #23 → #24**, **#25 → #26**, **#29 → #30**, and
+stacks are **#17 → #44**, **#22 → #23 → #24**, **#25 → #26**, **#29 → #30**, and
 **#27 → #31 → #32 → #33**. These are review families, not instructions to combine
 all tips into a default runtime.
 
