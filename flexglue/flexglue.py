@@ -338,6 +338,7 @@ class FlexGlue(nn.Module):
                 if (score < conf.min_covisibility * gamma).all():
                     layer, covisibility_score = k, score
                     break
+        del enc0, enc1  # No later stage uses the transformer encodings.
         hw = (f0.shape[-2:], f1.shape[-2:])
         context = self.pair_context(x0, x1, hw, layer, covisibility_score)
         if conf.refine:
