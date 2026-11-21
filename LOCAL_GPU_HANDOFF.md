@@ -13,17 +13,26 @@ directory, and the current PR bodies. No earlier artifact archive is required.
   already existed there. The stronger regression now lives in the existing test
   file; 13 maintained methods passed. The older measurements remain evidence for
   that optimization, not an additional gain over #12.
-- **#27 → #31 → #32 → #33** now has repaired ancestry. These merges preserve each
-  tree exactly; they reconcile repeated test commits, not new runtime changes.
+- **#27 → #31 → #32 → #33** now has current parent ancestry throughout. The final
+  maintenance changes tests only: copied descriptors retain their default
+  precision setting, CUDA comparisons require complete outputs, and the RGB8
+  fixture supplies generated weights through the real checkpoint reader.
 - **#17 → #44** now explicitly stacks the distance-bound fix and dense-cycle
   optimization. Its regression exercises real geometry rather than a helper mock.
-- Existing upstream **#29** now matches fork **#27** after removing an unused
-  export helper and fixture setting.
+- Existing upstream **#29** and fork **#27** have identical complete trees. The
+  unused export helper is removed; the required `mp=None` fixture setting remains.
+- **#42** now supplies that same default in its image-size fixture. The combined
+  checkpoint/RGB8/image-size diagnostic suite passes 105 CPU methods, with 22
+  device or optional methods skipped. This is no new GPU or performance result.
 - Fork `main` remains a separate, older integration line. **#21/#34/#35/#37** retain
   main-target CI/backport work. **#45** remains a small independent entmax
   correctness proposal overlapping the readout family. Do not apply it twice.
+- **Twelve obsolete branches were removed** after checking all active fork and
+  upstream heads and bases. Eleven closed PR histories retain the exact former
+  commits; the old base is already in `main` ancestry. There are 39 open fork PRs
+  and three drafts (#36/#47/#51), but only the seven required GPU heads below.
 - **No new upstream PRs.** Keep existing review units small; update an existing
-  upstream counterpart where appropriate. Closed source refs remain as history.
+  upstream counterpart where appropriate. Use the current review owners above.
 
 ## First: use the existing working environment
 
