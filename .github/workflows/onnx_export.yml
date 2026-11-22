@@ -11,12 +11,16 @@ on:
     paths:
       - "flexglue/**"
       - "onnx/**"
+      - "tests/**"
+      - "demo.ipynb"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
   pull_request:
     paths:
       - "flexglue/**"
       - "onnx/**"
+      - "tests/**"
+      - "demo.ipynb"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
 
@@ -41,9 +45,12 @@ jobs:
           python -m pip install --upgrade pip
           # CPU-only PyTorch; the export and its check depend on these versions.
           python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install numpy opencv-python-headless \
+          python -m pip install numpy opencv-python-headless matplotlib \
             onnx==1.23.2 onnxscript==0.7.2 onnxruntime==1.23.2
           python -m pip install --no-deps -e .
+
+      - name: Run native regression tests
+        run: python -m unittest discover -s tests -v
 
       - name: Cache the weights
         uses: actions/cache@v4

@@ -1,0 +1,78 @@
+"""Exercise the notebook's checkout guard without IPython or shell effects."""
+
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+
+def compile_startup(source, filename):
+    lines = []
+    for line in "".join(source).splitlines(keepends=True):
+        if line.strip() == "import torch":
+            break
+        if line.lstrip().startswith(("!", "%")):
+            indent = line[: len(line) - len(line.lstrip())]
+            line = f"{indent}calls.append({line.strip()!r})\n"
+        lines.append(line)
+    else:
+        raise AssertionError("Expected 'import torch' after the notebook setup")
+    return compile("".join(lines), filename, "exec")
+
+
+class DemoStartupTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.notebook = Path(__file__).resolve().parents[1] / "demo.ipynb"
+        cells = json.loads(cls.notebook.read_text(encoding="utf-8"))["cells"]
+        startup = next(cell for cell in cells if cell["cell_type"] == "code")
+        cls.source = startup["source"]
+
+    def run_startup(self, dirname, checkout, source=None):
+        startup = compile_startup(
+            self.source if source is None else source, str(self.notebook)
+        )
+        calls = []
+        with tempfile.TemporaryDirectory() as folder:
+            cwd = Path(folder) / dirname
+            cwd.mkdir()
+            if checkout:
+                (cwd / "flexglue").mkdir()
+                (cwd / "flexglue" / "__init__.py").touch()
+            previous = Path.cwd()
+            try:
+                os.chdir(cwd)
+                exec(startup, {"calls": calls})
+            finally:
+                os.chdir(previous)
+        return calls
+
+    def assert_bootstrap(self, calls):
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(calls[0].startswith("!git clone "))
+        self.assertEqual(calls[1], "%cd FlexGlue")
+        self.assertTrue(calls[2].startswith("%pip install "))
+
+    def test_existing_checkout_can_have_another_directory_name(self):
+        for dirname in ("FlexGlue", "flexglue-work"):
+            with self.subTest(dirname=dirname):
+                self.assertEqual(self.run_startup(dirname, True), [])
+
+    def test_matching_directory_name_without_package_bootstraps(self):
+        self.assert_bootstrap(self.run_startup("FlexGlue", False))
+
+    def test_fresh_colab_directory_bootstraps(self):
+        source = "".join(self.source)
+        cutoff = len(source) // 2
+        for layout, serialized in (
+            ("as stored", self.source),
+            ("single string", source),
+            ("multiline fragments", [source[:cutoff], source[cutoff:]]),
+        ):
+            with self.subTest(layout=layout):
+                self.assert_bootstrap(self.run_startup("content", False, serialized))
+
+
+if __name__ == "__main__":
+    unittest.main()

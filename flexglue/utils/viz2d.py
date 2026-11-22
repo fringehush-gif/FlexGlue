@@ -44,7 +44,7 @@ def plot_images(
     """Images side by side: numpy (H, W, 3), torch (3, H, W) or mono (H, W)."""
     imgs = [
         (
-            img.permute(1, 2, 0).cpu().numpy()
+            to_numpy(img.permute(1, 2, 0))
             if isinstance(img, torch.Tensor) and img.dim() == 3
             else to_numpy(img)
         )
@@ -99,11 +99,13 @@ def plot_matches(
     axes: Optional[Tuple[plt.Axes, plt.Axes]] = None,
 ) -> None:
     """Matches (N, 2) in corner coordinates between the two plotted images."""
-    fig = plt.gcf()
-    ax0, ax1 = fig.axes[:2] if axes is None else axes
+    ax0, ax1 = plt.gcf().axes[:2] if axes is None else axes
+    fig = ax0.figure
     kpts0, kpts1 = to_numpy(kpts0), to_numpy(kpts1)
     if len(kpts0) != len(kpts1):
         raise ValueError(f"Got {len(kpts0)} and {len(kpts1)} points.")
+    if len(kpts0) == 0:
+        return
     if color is None:
         span = np.ptp(kpts0, axis=0, keepdims=True).clip(min=1e-6)
         color = cm_grad2d((kpts0 - kpts0.min(axis=0, keepdims=True)) / span)
