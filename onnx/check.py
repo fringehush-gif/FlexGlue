@@ -11,10 +11,9 @@ the assets, with SIFT keypoints, and compares:
 The options of the matcher (float16 transformer layers, fused operators of
 ONNX Runtime, early stopping) and the input resolution are read from the
 models. A matcher with early stopping is compared with early_stop_decay=1,
-which never stops early. If it checks the covisibility score after every layer
-but the first and the last, as FlexGlue does (export with --early_stop_layers
-2,...,8), it is also compared with early stopping, for early_stop_decay in
-EARLY_STOP_DECAYS. Otherwise, the outputs with early stopping are only printed.
+which never stops early. Enabled early stopping is also compared against
+FlexGlue using the same check layers read from the graph, for early_stop_decay
+in EARLY_STOP_DECAYS.
 
 Requires onnx, onnxscript and onnxruntime (onnxruntime-gpu on GPU).
 
@@ -25,7 +24,6 @@ Usage (from the root of the repository):
 """
 
 import argparse
-import re
 import sys
 import tempfile
 import time
@@ -40,7 +38,13 @@ import torch
 
 # Also run from a clone of the repository without installing it.
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from export import DEBUG_OUTPUTS, MATCHER_OUTPUTS, export_matcher  # noqa: E402
+from export import (  # noqa: E402
+    DEBUG_OUTPUTS,
+    MATCHER_OUTPUTS,
+    export_matcher,
+    read_early_stop_layers,
+)
+from match_pair import matcher_input_feeds, matcher_stride  # noqa: E402
 
 from flexglue import DINOv3Descriptor, FlexGlue  # noqa: E402
 from flexglue.flexglue import WEIGHTS_URL  # noqa: E402
@@ -94,8 +98,16 @@ def matcher_options(path: Path):
     """Options of an exported matcher, to export the equivalent debug graph."""
     model = onnx.load(str(path))
     graphs = list(subgraphs(model.graph))
+    metadata = {entry.key: entry.value for entry in model.metadata_props}
+    # Released graphs predate metadata and use nine layers with stride eight.
+    n_layers = int(metadata.get("flexglue.n_layers", "9"))
+    if n_layers < 0:
+        raise ValueError("Matcher layer count must be nonnegative.")
+    stride = matcher_stride(metadata)
+    early_stop = "early_stop_decay" in [i.name for i in model.graph.input]
     return SimpleNamespace(
-        size=input_size(model, "features0", stride=8),
+        n_layers=n_layers,
+        size=input_size(model, "features0", stride=stride),
         opset=next(o.version for o in model.opset_import if o.domain == ""),
         fp16=any(
             init.data_type == onnx.TensorProto.FLOAT16
@@ -107,13 +119,9 @@ def matcher_options(path: Path):
             for g in graphs
             for node in g.node
         ),
-        early_stop="early_stop_decay" in [i.name for i in model.graph.input],
-        # Layers after which the graph may stop early (see add_early_stopping).
-        early_stop_layers=sorted(
-            int(m.group(1))
-            for g in graphs
-            for node in g.node
-            if (m := re.fullmatch(r"early_stop_layer(\d+)_if", node.name))
+        early_stop=early_stop,
+        early_stop_layers=(
+            read_early_stop_layers(graphs, n_layers) if early_stop else []
         ),
     )
 
@@ -175,7 +183,10 @@ def descriptor_error(session, image: torch.Tensor, features, size) -> float:
     # Identical resize in both runtimes.
     x = pp.resize_images(image[None], size)
     features_ort = session.run(None, {"image": x.numpy()})[0]
-    return np.abs(features_ort - features["features"].cpu().numpy()).max()
+    features_pt = features["features"].cpu().numpy()
+    if features_ort.shape != features_pt.shape:
+        return float("inf")
+    return np.abs(features_ort - features_pt).max()
 
 
 def match_pytorch(
@@ -218,8 +229,29 @@ def matcher_feeds(features0, features1, kpts0, kpts1, min_covisibility):
     }
 
 
-def compare_matches(pred, outputs, tol):
+def compare_matches(pred, outputs, tol, *, num_keypoints1):
     """Compare the matches, match scores and covisibility scores."""
+    names = ("matches0", "matching_scores0", "covisibility_score")
+    expected = tuple(pred[name].shape for name in names)
+    if (
+        len(expected[0]) != 2
+        or expected[0][0] != 1
+        or expected[1] != expected[0]
+        or expected[2] != (1,)
+    ):
+        return False, f"Unexpected PyTorch output shapes: {expected}"
+    if len(outputs) != len(names):
+        return False, "Expected exactly three matcher outputs"
+    dtypes = (np.int64, np.float32, np.float32)
+    for name, actual, shape, dtype in zip(names, outputs, expected, dtypes):
+        if actual.shape != shape:
+            return False, f"Shape mismatch for {name}: {shape} vs {actual.shape}"
+        if actual.dtype != dtype:
+            return False, f"Unexpected dtype for {name}: {actual.dtype}"
+    if ((outputs[0] < -1) | (outputs[0] >= num_keypoints1)).any():
+        return False, "Matcher index outside [-1, number of target keypoints)"
+    if ((outputs[0] == -1) & (outputs[1] != 0)).any():
+        return False, "Unmatched keypoints must have zero scores"
     m0_ort, s0_ort, covis_ort = (x[0] for x in outputs[:3])
     m0_pt, s0_pt = pred["matches0"][0], pred["matching_scores0"][0]
     covis_pt = pred["covisibility_score"][0]
@@ -231,8 +263,10 @@ def compare_matches(pred, outputs, tol):
     score_median, score_jumps = median_and_fraction_above(
         np.abs(s0_ort[same] - s0_pt[same]), 0.01
     )
+    scores_finite = np.isfinite(s0_pt).all() and np.isfinite(s0_ort).all()
     ok = (
-        flips <= tol["flips"]
+        scores_finite
+        and flips <= tol["flips"]
         and score_median <= tol["score"]
         and score_jumps <= tol["jumps"]
         and abs(covis_ort - covis_pt) <= tol["score"]
@@ -240,7 +274,7 @@ def compare_matches(pred, outputs, tol):
     message = (
         f"matches pt={valid_pt.sum():5d} ort={valid_ort.sum():5d} flips={flips} "
         f"scores: median={score_median:.1e} >0.01={score_jumps:.1%} "
-        f"covis pt={covis_pt:.4f} ort={covis_ort:.4f}"
+        f"covis pt={covis_pt:.4f} ort={covis_ort:.4f} finite={bool(scores_finite)}"
     )
     return bool(ok), message
 
@@ -254,20 +288,27 @@ def compare_points(pred, debug, tol):
     taking a maximum.
     """
     pairs = (("p2d0_i1", "confidence0"), ("p2d1_i0", "confidence1"))
+    for pair in pairs:
+        for key in pair:
+            expected, actual = pred[key].shape, debug[key].shape
+            if expected != actual:
+                return False, f"shape mismatch for {key}: {expected} vs {actual}"
     px = np.concatenate(
         [np.linalg.norm(debug[p] - pred[p], axis=-1)[pred[c] >= 0.1] for p, c in pairs]
     )
     px_median, px_jumps = median_and_fraction_above(px, 1.0)
     conf_err = np.concatenate([np.abs(debug[c] - pred[c]) for _, c in pairs], -1)
     conf_p99 = np.quantile(conf_err, 0.99)
+    finite = np.isfinite(px).all() and np.isfinite(conf_err).all()
     ok = (
-        px_median <= tol["px"]
+        finite
+        and px_median <= tol["px"]
         and px_jumps <= tol["jumps"]
         and conf_p99 <= tol["confidence"]
     )
     message = (
         f"points: median={px_median:.1e}px >1px={px_jumps:.1%} (of {px.size}) "
-        f"conf p99={conf_p99:.1e}"
+        f"conf p99={conf_p99:.1e} finite={bool(finite)}"
     )
     return bool(ok), message
 
@@ -288,11 +329,12 @@ def check_matches(sessions, matcher, features, kpts, min_covisibility, tol, timi
     """Compare the matchers on one pair of images and keypoints."""
     pred = match_pytorch(matcher, *features, *kpts, min_covisibility)
     feeds = matcher_feeds(*features, *kpts, min_covisibility)
-    match_feeds = feeds
+    match_feeds = dict(feeds)
     if sessions.early_stop:  # early_stop_decay=1 never stops early
-        match_feeds = {**feeds, "early_stop_decay": np.array(1.0, np.float32)}
+        match_feeds["early_stop_decay"] = np.array(1.0, np.float32)
+    match_feeds = matcher_input_feeds(sessions.matcher, match_feeds)
     outputs = sessions.matcher.run(None, match_feeds)
-    ok, message = compare_matches(pred, outputs, tol)
+    ok, message = compare_matches(pred, outputs, tol, num_keypoints1=kpts[1].shape[1])
     if min_covisibility == 0:  # otherwise, the points may not be computed
         outputs = sessions.debug.run(None, feeds)[len(MATCHER_OUTPUTS) :]
         points_ok, points_message = compare_points(
@@ -308,13 +350,10 @@ def check_matches(sessions, matcher, features, kpts, min_covisibility, tol, timi
         f"{'OK' if ok else 'FAIL'}"
     )
     if sessions.early_stop and min_covisibility > 0:
-        if sessions.early_stop_comparable:
-            for decay in EARLY_STOP_DECAYS:
-                ok &= check_early_stop(
-                    sessions.matcher, matcher, features, kpts, feeds, decay, tol
-                )
-        else:
-            print_early_stop(sessions.matcher, feeds, early_stop_decay=0.5)
+        for decay in EARLY_STOP_DECAYS:
+            ok &= check_early_stop(
+                sessions.matcher, matcher, features, kpts, match_feeds, decay, tol
+            )
     return bool(ok)
 
 
@@ -327,20 +366,9 @@ def check_early_stop(session, matcher, features, kpts, feeds, decay, tol):
     outputs = session.run(
         None, {**feeds, "early_stop_decay": np.array(decay, np.float32)}
     )
-    ok, message = compare_matches(pred, outputs, tol)
+    ok, message = compare_matches(pred, outputs, tol, num_keypoints1=kpts[1].shape[1])
     print(f"    early_stop_decay={decay}: {message} {'OK' if ok else 'FAIL'}")
     return ok
-
-
-def print_early_stop(session, feeds, early_stop_decay: float):
-    """Outputs with early stopping, not compared: the graph checks other layers
-    than FlexGlue, which checks every layer but the first and the last."""
-    feeds = {**feeds, "early_stop_decay": np.array(early_stop_decay, np.float32)}
-    matches0, _, covisibility_score = session.run(None, feeds)
-    print(
-        f"    early_stop_decay={early_stop_decay}: "
-        f"matches={(matches0[0] > -1).sum()} covis={covisibility_score[0]:.4f}"
-    )
 
 
 def check_pair(sessions, models, names, size, num_keypoints, tol, timing):
@@ -350,9 +378,11 @@ def check_pair(sessions, models, names, size, num_keypoints, tol, timing):
     features = [describe_pytorch(models.descriptor, im, size) for im in images]
     all_ok, line = True, f"[{names[0]} / {names[1]}]"
     if sessions.descriptor is not None:
-        error = max(
-            descriptor_error(sessions.descriptor, im, f, size)
-            for im, f in zip(images, features)
+        error = np.max(
+            [
+                descriptor_error(sessions.descriptor, im, f, size)
+                for im, f in zip(images, features)
+            ]
         )
         all_ok = bool(error <= tol["features"])
         line += f" descriptor max abs error: {error:.2e} {'OK' if all_ok else 'FAIL'}"
@@ -394,7 +424,6 @@ def main():
         matcher=None,
         debug=None,
         early_stop=False,
-        early_stop_comparable=False,
     )
     models = SimpleNamespace(descriptor=None, matcher=None)
     sizes, precision = set(), ""
@@ -411,14 +440,19 @@ def main():
             raise SystemExit("The float16 matcher requires CUDA.")
         sizes.add(options.size)
         precision = "_fp16" if options.fp16 else ""
-        models.matcher = FlexGlue(weights=args.weights, describe=False, mp=None)
+        if options.early_stop and not options.early_stop_layers:
+            raise SystemExit("Early-stop graph has no recognized check-layer schedule.")
+        models.matcher = FlexGlue(
+            weights=args.weights,
+            describe=False,
+            n_layers=options.n_layers,
+            mp=None,
+            early_stop_layers=options.early_stop_layers if options.early_stop else None,
+        )
         models.matcher.eval()
         sessions.matcher = ort.InferenceSession(str(args.matcher), providers=providers)
         sessions.debug = debug_session(models.matcher, options, providers)
         sessions.early_stop = options.early_stop
-        sessions.early_stop_comparable = options.early_stop_layers == list(
-            range(2, models.matcher.conf.n_layers)
-        )
         models.matcher = models.matcher.to(device)
     if len(sizes) > 1:
         raise SystemExit(f"The models have different input sizes: {sizes}")
