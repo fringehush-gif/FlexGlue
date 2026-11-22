@@ -87,6 +87,16 @@ class VGG19BN(nn.Module):
                 x = layer(x)
         return feats
 
+    _stock_forward = forward
+
+    def _has_selectable_forward(self) -> bool:
+        forward = self.forward
+        compiled = getattr(self, "_compiled_stock_forward", None)
+        return (compiled is not None and forward is compiled) or (
+            getattr(forward, "__func__", None) is VGG19BN._stock_forward
+            and getattr(forward, "__self__", None) is self
+        )
+
 
 class Block(nn.Module):
     def __init__(self, dim: int, kernel_size: int = 5) -> None:
@@ -232,12 +242,14 @@ class RoMav2Refiner(nn.Module):
         scales = (1, *self.scales)
         extract = self.extract
         if (
-            getattr(extract, "__func__", None) is not RoMav2Refiner._stock_extract
-            or getattr(extract, "__self__", None) is not self
+            getattr(extract, "__func__", None) is RoMav2Refiner._stock_extract
+            and getattr(extract, "__self__", None) is self
+            and type(self.features) is VGG19BN
+            and self.features._has_selectable_forward()
         ):
-            features = extract(img, resize=resize)
-            return {s: features[s] for s in scales}
-        return self.features(pp.resize_images(img, resize), scales=scales)
+            return self.features(pp.resize_images(img, resize), scales=scales)
+        features = extract(img, resize=resize)
+        return {s: features[s] for s in scales}
 
     def forward(
         self,
