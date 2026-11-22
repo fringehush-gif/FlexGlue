@@ -221,7 +221,7 @@ def matcher_feeds(features0, features1, kpts0, kpts1, min_covisibility):
     }
 
 
-def compare_matches(pred, outputs, tol):
+def compare_matches(pred, outputs, tol, *, num_keypoints1):
     """Compare the matches, match scores and covisibility scores."""
     names = ("matches0", "matching_scores0", "covisibility_score")
     expected = tuple(pred[name].shape for name in names)
@@ -232,11 +232,18 @@ def compare_matches(pred, outputs, tol):
         or expected[2] != (1,)
     ):
         return False, f"Unexpected PyTorch output shapes: {expected}"
-    if len(outputs) < len(names):
-        return False, "Missing matcher outputs"
-    for name, actual, shape in zip(names, outputs, expected):
+    if len(outputs) != len(names):
+        return False, "Expected exactly three matcher outputs"
+    dtypes = (np.int64, np.float32, np.float32)
+    for name, actual, shape, dtype in zip(names, outputs, expected, dtypes):
         if actual.shape != shape:
             return False, f"Shape mismatch for {name}: {shape} vs {actual.shape}"
+        if actual.dtype != dtype:
+            return False, f"Unexpected dtype for {name}: {actual.dtype}"
+    if ((outputs[0] < -1) | (outputs[0] >= num_keypoints1)).any():
+        return False, "Matcher index outside [-1, number of target keypoints)"
+    if ((outputs[0] == -1) & (outputs[1] != 0)).any():
+        return False, "Unmatched keypoints must have zero scores"
     m0_ort, s0_ort, covis_ort = (x[0] for x in outputs[:3])
     m0_pt, s0_pt = pred["matches0"][0], pred["matching_scores0"][0]
     covis_pt = pred["covisibility_score"][0]
@@ -316,7 +323,7 @@ def check_matches(sessions, matcher, features, kpts, min_covisibility, tol, timi
     if sessions.early_stop:  # early_stop_decay=1 never stops early
         match_feeds = {**feeds, "early_stop_decay": np.array(1.0, np.float32)}
     outputs = sessions.matcher.run(None, match_feeds)
-    ok, message = compare_matches(pred, outputs, tol)
+    ok, message = compare_matches(pred, outputs, tol, num_keypoints1=kpts[1].shape[1])
     if min_covisibility == 0:  # otherwise, the points may not be computed
         outputs = sessions.debug.run(None, feeds)[len(MATCHER_OUTPUTS) :]
         points_ok, points_message = compare_points(
@@ -351,7 +358,7 @@ def check_early_stop(session, matcher, features, kpts, feeds, decay, tol):
     outputs = session.run(
         None, {**feeds, "early_stop_decay": np.array(decay, np.float32)}
     )
-    ok, message = compare_matches(pred, outputs, tol)
+    ok, message = compare_matches(pred, outputs, tol, num_keypoints1=kpts[1].shape[1])
     print(f"    early_stop_decay={decay}: {message} {'OK' if ok else 'FAIL'}")
     return ok
 

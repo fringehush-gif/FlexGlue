@@ -28,13 +28,13 @@ class ONNXCheckTest(unittest.TestCase):
     def setUp(self):
         n = 512
         self.pred = {
-            "matches0": np.arange(n)[None],
-            "matching_scores0": np.full((1, n), 0.5),
-            "covisibility_score": np.array([0.7]),
+            "matches0": np.arange(n, dtype=np.int64)[None],
+            "matching_scores0": np.full((1, n), 0.5, dtype=np.float32),
+            "covisibility_score": np.array([0.7], dtype=np.float32),
             "p2d0_i1": np.zeros((1, n, 2)),
             "p2d1_i0": np.zeros((1, n, 2)),
-            "confidence0": np.full((1, n), 0.5),
-            "confidence1": np.full((1, n), 0.5),
+            "confidence0": np.full((1, n), 0.5, dtype=np.float32),
+            "confidence1": np.full((1, n), 0.5, dtype=np.float32),
         }
         self.tol = self.check.TOLERANCES["cpu"]
 
@@ -85,7 +85,9 @@ class ONNXCheckTest(unittest.TestCase):
                             0, 0
                         ] = invalid
                         self.assertFalse(
-                            self.check.compare_matches(pred, outputs, self.tol)[0]
+                            self.check.compare_matches(
+                                pred, outputs, self.tol, num_keypoints1=512
+                            )[0]
                         )
 
     def test_nonfinite_compared_points_and_confidences_fail(self):
@@ -108,7 +110,11 @@ class ONNXCheckTest(unittest.TestCase):
             for k in ("matches0", "matching_scores0", "covisibility_score")
         ]
         outputs[1][0, 0] += 0.02
-        self.assertTrue(self.check.compare_matches(self.pred, outputs, self.tol)[0])
+        self.assertTrue(
+            self.check.compare_matches(
+                self.pred, outputs, self.tol, num_keypoints1=512
+            )[0]
+        )
         debug = {k: v.copy() for k, v in self.pred.items()}
         debug["p2d0_i1"][0, 0, 0] = 2
         debug["confidence0"][0, 0] += 0.02
@@ -140,7 +146,9 @@ class ONNXCheckTest(unittest.TestCase):
             pred[key].copy()
             for key in ("matches0", "matching_scores0", "covisibility_score")
         ]
-        self.assertTrue(self.check.compare_matches(pred, outputs, self.tol)[0])
+        self.assertTrue(
+            self.check.compare_matches(pred, outputs, self.tol, num_keypoints1=512)[0]
+        )
         for index in range(3):
             for kind in ("points", "empty_batch", "extra_batch"):
                 if index == 2 and kind == "points":
@@ -153,7 +161,9 @@ class ONNXCheckTest(unittest.TestCase):
                         malformed[index] = malformed[index][:0]
                     else:
                         malformed[index] = np.concatenate([malformed[index]] * 2)
-                    ok, message = self.check.compare_matches(pred, malformed, self.tol)
+                    ok, message = self.check.compare_matches(
+                        pred, malformed, self.tol, num_keypoints1=512
+                    )
                     self.assertFalse(ok)
                     self.assertIn("shape", message.lower())
         multiple = {key: value.copy() for key, value in pred.items()}
@@ -164,9 +174,95 @@ class ONNXCheckTest(unittest.TestCase):
             for key in ("matches0", "matching_scores0", "covisibility_score")
         ]
         self.assertFalse(
-            self.check.compare_matches(multiple, matching_outputs, self.tol)[0]
+            self.check.compare_matches(
+                multiple, matching_outputs, self.tol, num_keypoints1=512
+            )[0]
         )
-        self.assertFalse(self.check.compare_matches(pred, outputs[:2], self.tol)[0])
+        self.assertFalse(
+            self.check.compare_matches(pred, outputs[:2], self.tol, num_keypoints1=512)[
+                0
+            ]
+        )
+
+    def test_match_output_contract_precedes_numeric_tolerances(self):
+        names = ("matches0", "matching_scores0", "covisibility_score")
+        pred = {key: value.copy() for key, value in self.pred.items()}
+        pred["matches0"].fill(-1)
+        pred["matching_scores0"].fill(0)
+        outputs = [pred[key].copy() for key in names]
+        # A rejected point may become matched within the flip tolerance, but
+        # its target still has to be a real index with the exported dtype.
+        valid = [value.copy() for value in outputs]
+        valid[0][0, 0] = 2
+        self.assertTrue(
+            self.check.compare_matches(pred, valid, self.tol, num_keypoints1=3)[0]
+        )
+        for value in (-2, 3, 999):
+            with self.subTest(index=value):
+                malformed = [array.copy() for array in outputs]
+                malformed[0][0, 0] = value
+                accepted, message = self.check.compare_matches(
+                    pred, malformed, self.tol, num_keypoints1=3
+                )
+                self.assertFalse(accepted)
+                self.assertIn("index", message.lower())
+        for output_index, dtype in (
+            (0, np.int32),
+            (0, np.float32),
+            (0, np.float64),
+            (1, np.int32),
+            (1, np.float16),
+            (1, np.float64),
+            (2, np.int32),
+            (2, np.float16),
+            (2, np.float64),
+        ):
+            with self.subTest(output=names[output_index], dtype=dtype):
+                malformed = [array.copy() for array in outputs]
+                malformed[output_index] = malformed[output_index].astype(dtype)
+                accepted, message = self.check.compare_matches(
+                    pred, malformed, self.tol, num_keypoints1=3
+                )
+                self.assertFalse(accepted)
+                self.assertIn("dtype", message.lower())
+        for value in (np.nan, np.inf, -np.inf, 0.5):
+            with self.subTest(float_index=value):
+                malformed = [array.copy() for array in outputs]
+                malformed[0] = malformed[0].astype(np.float64)
+                malformed[0][0, 0] = value
+                self.assertFalse(
+                    self.check.compare_matches(
+                        pred, malformed, self.tol, num_keypoints1=3
+                    )[0]
+                )
+        self.assertFalse(
+            self.check.compare_matches(
+                pred, [*outputs, outputs[0]], self.tol, num_keypoints1=3
+            )[0]
+        )
+
+    def test_unmatched_scores_are_zero_even_for_tolerated_flips(self):
+        outputs = [
+            self.pred[key].copy()
+            for key in ("matches0", "matching_scores0", "covisibility_score")
+        ]
+        # One valid match may be rejected within the numerical tolerance.
+        # The rejected output must still obey the zero-score contract.
+        outputs[0][0, 0] = -1
+        outputs[1][0, 0] = 0
+        self.assertTrue(
+            self.check.compare_matches(
+                self.pred, outputs, self.tol, num_keypoints1=512
+            )[0]
+        )
+        for score in (-0.5, 1e-10, 0.5):
+            with self.subTest(score=score):
+                outputs[1][0, 0] = score
+                accepted, message = self.check.compare_matches(
+                    self.pred, outputs, self.tol, num_keypoints1=512
+                )
+                self.assertFalse(accepted)
+                self.assertIn("zero scores", message)
 
     def test_descriptor_output_shape_cannot_broadcast(self):
         reference = torch.zeros(1, 3, 4, 5)
