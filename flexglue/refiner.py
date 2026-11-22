@@ -20,6 +20,39 @@ from .utils import ops
 from .utils import preprocess as pp
 
 
+def _covariance_from_precision(
+    precision: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
+    """Invert packed precision and scale the covariance to destination pixels."""
+    p00, p10, p11 = precision.unbind(-1)
+    adjugate = torch.stack([p11, -p10, -p10, p00], -1).unflatten(-1, (2, 2))
+    determinant = p00 * p11 - p10 * p10
+    sx, sy = scale[..., :, None], scale[..., None, :]
+    if precision.dtype != torch.float32 or precision.device.type not in ("cpu", "cuda"):
+        return (adjugate / determinant[..., None, None]) * sx * sy
+
+    # FP64 exactly represents products of finite FP32 entries. This can repair
+    # cancellation during inversion, but cannot reconstruct a lost SPD matrix.
+    wide = torch.nan_to_num(precision.double(), nan=0.0, posinf=0.0, neginf=0.0)
+    a, b, c = wide.unbind(-1)
+    accurate = a * c - b * b
+    inaccurate = (
+        ~determinant.isfinite()
+        | (determinant <= 0)
+        | ((accurate - determinant).abs() > 1e-5 * determinant.abs())
+    )
+    rescue = (a > 0) & (c > 0) & p10.isfinite() & (accurate > 0) & inaccurate
+    mask = rescue[..., None, None]
+    # Mask the inputs of inactive divides so their gradients cannot leak NaNs.
+    ordinary = torch.where(mask, 0.0, adjugate)
+    ordinary = ordinary / torch.where(rescue, 1.0, determinant)[..., None, None]
+    ordinary = ordinary * sx * sy
+    corrected = torch.where(mask, adjugate, 0.0).double()
+    corrected = corrected / torch.where(rescue, accurate, 1.0)[..., None, None]
+    corrected = corrected * sx.double() * sy.double()
+    return torch.where(mask, corrected.to(ordinary.dtype), ordinary)
+
+
 def bhwc_interpolate(x: torch.Tensor, size: Tuple[int, int]) -> torch.Tensor:
     x = F.interpolate(ops.to_chw(x), size, mode="bilinear", align_corners=False)
     return ops.to_hwc(x)
@@ -264,9 +297,6 @@ class RoMav2Refiner(nn.Module):
         gridi_nj, mlogit_i = self(feats_i, feats_j, cgridi_nj, clogit_i)
         h_rj, w_rj = feats_j[1].shape[1:3]
         # RoMa's precision is in refine pixels of image j: invert, then scale to image j
-        p00, p10, p11 = mlogit_i[..., 1], mlogit_i[..., 2], mlogit_i[..., 3]
-        cov = torch.stack([p11, -p10, -p10, p00], -1).unflatten(-1, (2, 2))
-        cov = cov / (p00 * p11 - p10 * p10)[..., None, None]
         scale = torch.stack([size_j[:, 0] / w_rj, size_j[:, 1] / h_rj], -1)[
             :, None, None
         ]
@@ -274,5 +304,5 @@ class RoMav2Refiner(nn.Module):
             "dense_p2di_nj": gridi_nj,
             "dense_p2di_ij": ops.denormalize_keypoints(gridi_nj, size_j),
             "dense_confidencei": torch.sigmoid(mlogit_i[..., 0]),
-            "dense_covi_ij": cov * scale[..., :, None] * scale[..., None, :],
+            "dense_covi_ij": _covariance_from_precision(mlogit_i[..., 1:4], scale),
         }
