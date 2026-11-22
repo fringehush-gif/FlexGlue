@@ -95,7 +95,8 @@ class CompileSupportTest(unittest.TestCase):
             "cudagraph_mark_step_begin",
             wraps=torch.compiler.cudagraph_mark_step_begin,
         ) as mark_step, torch.no_grad():
-            self.assertIs(model.compile(mode="default", static_lengths=(4,)), model)
+            # Keep the compiled and eager query shapes identical.
+            self.assertIs(model.compile(mode="default", static_lengths=(2,)), model)
             for _ in range(2):
                 actual = model.match(*data)
                 for key, value in expected.items():
