@@ -45,8 +45,8 @@ PROFILES = {
         False,
         "d801d271920f64953f071f6fe735424aca2875b0",
     ),
-    25: ("refiner", None, False, False, "c6ae3d2427ae39c5d969463f66b0b82258510348"),
-    26: ("refiner", None, True, False, "6bd9368d028f6b78fc9e915d4f79340f5dd8026b"),
+    25: ("refiner", None, False, False, "0aae87fdd1ea30434cb4c9b1c6af78ca1c60b7f7"),
+    26: ("refiner", None, True, False, "15aa1c6007f9384a21e0524b62791b41a452c1f2"),
     36: ("covariance", None, False, True, "1d98a6fb9f12ba8e1102261d4f8765ef5cf1baa8"),
 }
 
@@ -439,8 +439,9 @@ def refiner(args):
     fused_consumers = []
     tests = []
     if args.device == "cuda":
-        with patch.object(
-            module.VGG19BN, "forward", require_compilation(module.VGG19BN.forward)
+        compiled_forward = require_compilation(module.VGG19BN.forward)
+        with patch.multiple(
+            module.VGG19BN, forward=compiled_forward, _stock_forward=compiled_forward
         ):
             tests.append(
                 maintained(

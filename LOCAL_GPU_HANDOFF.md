@@ -87,8 +87,8 @@ to make the run pass. Keep executable edits in reviewed commits, not dirty trees
 | 2 | #22 `91d0aea051a8` | Native, unpromoted selected-root differentiation and the recovered BF16 actual-head fixture. |
 | 2 | #23 `a62db4d54f5e` | Separate FP16/BF16-to-FP32 policy, confidence behavior and the original FP16 CUDA failure regression. |
 | 2 | #24 `d801d271920f` | Readout stack plus actual eligible Triton launch, rectangular exact-512 fixture and fallback/gradient/compiled delegation. |
-| 3 | #25 `c6ae3d2427ae` | Native refiner reduction layout through actual consumers and gradients, including mixed precision and compiled feature-cache lifetime. |
-| 3 | #26 `6bd9368d028f` | Native/fused/fallback refinement composition and actual Triton backend regressions. |
+| 3 | #25 `0aae87fdd1ea` | Native refiner reduction layout through actual consumers and gradients, including mixed precision and compiled feature-cache lifetime. |
+| 3 | #26 `15aa1c6007f9` | Native/fused/fallback refinement composition and actual Triton backend regressions. |
 | 4 | #36 `1d98a6fb9f12` | Stored FP32 precision inversion in maintained tests, actual two-stage consumer and fullgraph-compiled forward. |
 
 Run the profiles in that order, stopping to investigate a failure:
