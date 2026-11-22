@@ -605,6 +605,136 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
     "set FLEXGLUE_TEST_RGB8_CUDA=1 for optional Linux CUDA checks",
 )
 class RGB8CudaTest(PacketAssertions, unittest.TestCase):
+    def test_triton_codebook_grad_requires_no_grad_mode(self):
+        from flexglue.utils import rgb8_torch, rgb8_triton
+
+        rgb = np.zeros((2, 3, 3), dtype=np.uint8)
+        table = torch.ones(256, device="cuda", requires_grad=True)
+        options = {"target_hw": (2, 3), "codebook_device": table}
+        with torch.enable_grad():
+            native = rgb8_torch.prepare_rgb8(rgb, **options)
+            native.tensor.sum().backward()
+            expected_grad = torch.zeros_like(table)
+            expected_grad[0] = rgb.size
+            torch.testing.assert_close(table.grad, expected_grad, rtol=0, atol=0)
+            with self.assertRaisesRegex(
+                ValueError, "does not differentiate the codebook"
+            ):
+                rgb8_triton.prepare_rgb8(rgb, **options)
+        for mode in (torch.no_grad, torch.inference_mode):
+            with self.subTest(mode=mode), mode():
+                fused = rgb8_triton.prepare_rgb8(rgb, **options)
+                self.assertFalse(fused.tensor.requires_grad)
+                torch.testing.assert_close(fused.tensor, native.tensor, rtol=0, atol=0)
+
+    def test_triton_codebook_rejects_forward_ad_under_no_grad(self):
+        from flexglue.utils import rgb8_torch, rgb8_triton
+
+        rgb = np.zeros((2, 3, 3), dtype=np.uint8)
+        table = torch.ones(256, device="cuda")
+        forward_ad = torch.autograd.forward_ad
+        with forward_ad.dual_level(), torch.no_grad():
+            dual = forward_ad.make_dual(table, torch.full_like(table, 2))
+            options = {"target_hw": (2, 3), "codebook_device": dual}
+            native = rgb8_torch.prepare_rgb8(rgb, **options).tensor
+            tangent = forward_ad.unpack_dual(native).tangent
+            torch.testing.assert_close(
+                tangent, torch.full_like(native, 2), rtol=0, atol=0
+            )
+            with self.assertRaisesRegex(
+                ValueError, "does not differentiate the codebook"
+            ):
+                rgb8_triton.prepare_rgb8(rgb, **options)
+
+    def test_lazy_negative_codebook_on_side_stream(self):
+        from flexglue.utils import _rgb8, rgb8_triton
+
+        rgb = np.zeros((512, 512, 3), dtype=np.uint8)
+        side = torch.cuda.Stream()
+        events = []
+        record, resolve = torch.Tensor.record_stream, torch.Tensor.resolve_neg
+
+        def recording(x, stream):
+            events.append(("record", x, stream.cuda_stream))
+            return record(x, stream)
+
+        def resolving(x):
+            events.append(
+                ("resolve", x, torch.cuda.current_stream(x.device).cuda_stream)
+            )
+            return resolve(x)
+
+        def lookup(source, table, target_hw, source_is_bgr):
+            return table[source.long()].permute(2, 0, 1).unsqueeze(0).contiguous()
+
+        with torch.inference_mode(), torch.cuda.stream(side):
+            table = torch._neg_view(torch.full((256,), -1.0, device="cuda"))
+            plain = torch.ones(256, device="cuda")
+            bad = torch._neg_view(torch.ones(255, device="cuda"))
+            self.assertTrue(table.is_neg())
+            with patch.object(torch.Tensor, "record_stream", recording), patch.object(
+                torch.Tensor, "resolve_neg", resolving
+            ):
+                fused = rgb8_triton.prepare_rgb8(rgb, codebook_device=table)
+                ordinary = rgb8_triton.prepare_rgb8(rgb, codebook_device=plain)
+                with self.assertRaisesRegex(ValueError, "caller-owned codebook"):
+                    _rgb8.prepare_rgb8(rgb, codebook_device=bad, resize=lookup)
+            native = _rgb8.prepare_rgb8(rgb, codebook_device=table, resize=lookup)
+            resolved = fused.owners[-1]
+            self.assertIsNot(resolved, table)
+            self.assertFalse(resolved.is_neg())
+            self.assertIs(ordinary.owners[-1], plain)
+            self.assertEqual(
+                [(kind, stream) for kind, t, stream in events if t is table],
+                [("record", side.cuda_stream), ("resolve", side.cuda_stream)],
+            )
+            self.assertTrue(
+                any(
+                    kind == "record" and t is resolved and stream == side.cuda_stream
+                    for kind, t, stream in events
+                )
+            )
+            self.assertFalse(
+                any(
+                    kind == "resolve" and (t is plain or t is bad)
+                    for kind, t, _ in events
+                )
+            )
+            fused.require_current_stream()
+            side.synchronize()
+            for prepared in (fused, ordinary, native):
+                torch.testing.assert_close(
+                    prepared.tensor, torch.ones_like(prepared.tensor), rtol=0, atol=0
+                )
+        with self.assertRaisesRegex(RuntimeError, "producer stream"):
+            fused.require_current_stream()
+
+    def test_fast_path_retains_stock_preprocessing_resize_contract(self):
+        from flexglue.utils import rgb8_torch
+
+        descriptor = self.descriptor
+        rgb = np.zeros((13, 17, 3), dtype=np.uint8)
+        rebound = tiny_descriptor((512, 512))
+        rebound.edge_divisible_by = 1024
+        for name, resize, overrides in (
+            ("float resize", (512.0, 512.0), {}),
+            ("instance divisor", (512, 512), {"edge_divisible_by": 1024}),
+            ("rebound method", (512, 512), {"preprocess": rebound.preprocess}),
+        ):
+            override = (
+                patch.multiple(descriptor, **overrides) if overrides else nullcontext()
+            )
+            with self.subTest(
+                name=name
+            ), torch.inference_mode(), override, patch.object(
+                rgb8_torch, "prepare_rgb8", side_effect=AssertionError("fast path")
+            ):
+                tensor = numpy_image_to_torch(rgb).cuda()
+                with self.assertRaisesRegex(ValueError, "resize must be"):
+                    descriptor({"image": tensor}, resize=resize)
+                with self.assertRaisesRegex(ValueError, "resize must be"):
+                    descriptor.describe_rgb8(rgb, resize=resize)
+
     def test_custom_preprocess_uses_original_pixels(self):
         from flexglue.utils import rgb8_torch, rgb8_triton
 
