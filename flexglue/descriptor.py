@@ -30,7 +30,15 @@ class ConvNeXtBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.norm(ops.to_hwc(self.dwconv(x)))
-        y = self.gamma * self.pwconv2(self.act(self.pwconv1(y)))
+        if torch.jit.is_scripting():
+            # TorchScript requires direct calls to registered submodules.
+            y = self.gamma * self.pwconv2(self.act(self.pwconv1(y)))
+        else:
+            # Resolve the outer operands before pwconv1 hooks can rebind them.
+            gamma, pwconv2, act = self.gamma, self.pwconv2, self.act
+            y = self.pwconv1(y)
+            y = act(y)
+            y = gamma * pwconv2(y)
         return x + ops.to_chw(y)
 
 
@@ -96,6 +104,7 @@ class LinearConvHead(nn.Module):
             if c.shape[-2:] != (h, w):
                 c = F.interpolate(c, (h, w), mode="bilinear", align_corners=False)
             x = x + c
+            del c
         return self.out_norm(self.down(x + self.mlp(x)))
 
 
