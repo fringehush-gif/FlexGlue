@@ -69,8 +69,14 @@ jobs:
         run: |
           python -m unittest discover -s tests -p 'test_early_stop*.py' -v
           python -m unittest discover -s tests -p 'test_onnx*.py' -v
-          python -m unittest discover -s tests -p 'test_export*.py' -v
-          python -m unittest discover -s tests -p 'test_non_gemm_export.py' -v
+          # These sibling export tests are present in combined landing stacks.
+          # Recent unittest versions fail discovery when a pattern has no tests.
+          if compgen -G 'tests/test_export*.py' > /dev/null; then
+            python -m unittest discover -s tests -p 'test_export*.py' -v
+          fi
+          if [ -f tests/test_non_gemm_export.py ]; then
+            python -m unittest discover -s tests -p 'test_non_gemm_export.py' -v
+          fi
 
       - name: Cache the weights
         uses: actions/cache@v4
