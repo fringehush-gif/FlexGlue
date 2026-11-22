@@ -239,8 +239,10 @@ def compare_matches(pred, outputs, tol):
     score_median, score_jumps = median_and_fraction_above(
         np.abs(s0_ort[same] - s0_pt[same]), 0.01
     )
+    scores_finite = np.isfinite(s0_pt).all() and np.isfinite(s0_ort).all()
     ok = (
-        flips <= tol["flips"]
+        scores_finite
+        and flips <= tol["flips"]
         and score_median <= tol["score"]
         and score_jumps <= tol["jumps"]
         and abs(covis_ort - covis_pt) <= tol["score"]
@@ -248,7 +250,7 @@ def compare_matches(pred, outputs, tol):
     message = (
         f"matches pt={valid_pt.sum():5d} ort={valid_ort.sum():5d} flips={flips} "
         f"scores: median={score_median:.1e} >0.01={score_jumps:.1%} "
-        f"covis pt={covis_pt:.4f} ort={covis_ort:.4f}"
+        f"covis pt={covis_pt:.4f} ort={covis_ort:.4f} finite={bool(scores_finite)}"
     )
     return bool(ok), message
 
@@ -262,20 +264,27 @@ def compare_points(pred, debug, tol):
     taking a maximum.
     """
     pairs = (("p2d0_i1", "confidence0"), ("p2d1_i0", "confidence1"))
+    for pair in pairs:
+        for key in pair:
+            expected, actual = pred[key].shape, debug[key].shape
+            if expected != actual:
+                return False, f"shape mismatch for {key}: {expected} vs {actual}"
     px = np.concatenate(
         [np.linalg.norm(debug[p] - pred[p], axis=-1)[pred[c] >= 0.1] for p, c in pairs]
     )
     px_median, px_jumps = median_and_fraction_above(px, 1.0)
     conf_err = np.concatenate([np.abs(debug[c] - pred[c]) for _, c in pairs], -1)
     conf_p99 = np.quantile(conf_err, 0.99)
+    finite = np.isfinite(px).all() and np.isfinite(conf_err).all()
     ok = (
-        px_median <= tol["px"]
+        finite
+        and px_median <= tol["px"]
         and px_jumps <= tol["jumps"]
         and conf_p99 <= tol["confidence"]
     )
     message = (
         f"points: median={px_median:.1e}px >1px={px_jumps:.1%} (of {px.size}) "
-        f"conf p99={conf_p99:.1e}"
+        f"conf p99={conf_p99:.1e} finite={bool(finite)}"
     )
     return bool(ok), message
 
@@ -345,9 +354,11 @@ def check_pair(sessions, models, names, size, num_keypoints, tol, timing):
     features = [describe_pytorch(models.descriptor, im, size) for im in images]
     all_ok, line = True, f"[{names[0]} / {names[1]}]"
     if sessions.descriptor is not None:
-        error = max(
-            descriptor_error(sessions.descriptor, im, f, size)
-            for im, f in zip(images, features)
+        error = np.max(
+            [
+                descriptor_error(sessions.descriptor, im, f, size)
+                for im, f in zip(images, features)
+            ]
         )
         all_ok = bool(error <= tol["features"])
         line += f" descriptor max abs error: {error:.2e} {'OK' if all_ok else 'FAIL'}"
