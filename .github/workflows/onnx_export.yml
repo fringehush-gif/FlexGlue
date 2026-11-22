@@ -11,12 +11,14 @@ on:
     paths:
       - "flexglue/**"
       - "onnx/**"
+      - "tests/**"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
   pull_request:
     paths:
       - "flexglue/**"
       - "onnx/**"
+      - "tests/**"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
 
@@ -27,6 +29,8 @@ concurrency:
 jobs:
   export-and-check:
     runs-on: ubuntu-latest
+    env:
+      ORT_DISABLE_TELEMETRY: "1"
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +48,9 @@ jobs:
           python -m pip install numpy opencv-python-headless \
             onnx==1.23.2 onnxscript==0.7.2 onnxruntime==1.23.2
           python -m pip install --no-deps -e .
+
+      - name: Run native regression tests
+        run: python -m unittest discover -s tests -v
 
       - name: Cache the weights
         uses: actions/cache@v4

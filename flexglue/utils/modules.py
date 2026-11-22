@@ -9,6 +9,21 @@ from torch import nn
 from . import ops
 
 
+def _autocast_dtype(device_type: str) -> Optional[torch.dtype]:
+    """Active autocast dtype, retaining the older CPU/CUDA query APIs."""
+    if hasattr(torch, "get_autocast_dtype"):
+        return (
+            torch.get_autocast_dtype(device_type)
+            if torch.is_autocast_enabled(device_type)
+            else None
+        )
+    if device_type == "cpu" and torch.is_autocast_cpu_enabled():
+        return torch.get_autocast_cpu_dtype()
+    if device_type == "cuda" and torch.is_autocast_enabled():
+        return torch.get_autocast_gpu_dtype()
+    return None
+
+
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1, x2 = x.unflatten(-1, (-1, 2)).unbind(-1)
     return torch.stack((-x2, x1), -1).flatten(-2)
@@ -89,7 +104,23 @@ class SelfBlock(nn.Module):
         self.blocked_qkv = True
 
     def forward(self, x: torch.Tensor, encoding: torch.Tensor) -> torch.Tensor:
+        autocast_dtype = None
+        if not torch.jit.is_scripting() and x.dtype in (torch.float16, torch.bfloat16):
+            # A caller's autocast may differ from this attention region's policy.
+            autocast_dtype = _autocast_dtype(x.device.type)
+            # Overrides and input pre-hooks own their conversion contract.
+            if (
+                autocast_dtype is None
+                and type(self.Wqkv) is nn.Linear
+                and "forward" not in self.Wqkv.__dict__
+                and not self.Wqkv._forward_pre_hooks
+                and not nn.modules.module._global_forward_pre_hooks
+            ):
+                x = x.to(self.Wqkv.weight.dtype)
         qkv = self.Wqkv(x)  # token-major (B, N, H, D) q, k, v
+        if not torch.jit.is_scripting() and autocast_dtype is not None:
+            if x.dtype in (torch.float16, torch.bfloat16) and x.dtype != autocast_dtype:
+                x = x.float()  # a residual must not mix the two low-precision dtypes
         if self.blocked_qkv:
             q, k, v = qkv.unflatten(-1, (3, self.num_heads, -1)).unbind(-3)
         else:
