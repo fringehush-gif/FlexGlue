@@ -2,6 +2,7 @@ import copy
 import importlib.util
 import unittest
 from collections import namedtuple
+from functools import wraps
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -94,6 +95,73 @@ class SelectedFeaturesTest(unittest.TestCase):
         for s in selected:
             torch.testing.assert_close(selected[s], full[s], rtol=0, atol=0)
 
+    def test_selected_respects_custom_and_compiled_feature_forwards(self):
+        ref = RoMav2Refiner.__new__(RoMav2Refiner)
+        nn.Module.__init__(ref)
+        ref.scales = (2,)
+
+        class CustomFeatures(nn.Module):
+            def forward(self, image):
+                return {s: image + s for s in (1, 2, 4)}
+
+        class CustomDispatch(VGG19BN):
+            def __call__(self, image):
+                return super().__call__(image)
+
+        with patch("flexglue.refiner.pp.resize_images", side_effect=lambda x, _: x):
+            ref.features = CustomFeatures()
+            torch.testing.assert_close(
+                ref.extract_selected(self.image)[2], self.image + 2
+            )
+
+            matcher = FlexGlue(weights=None, describe=False, n_layers=0)
+            matcher.refiner = ref
+            compile_forward = torch.compile
+
+            def compile_eager(forward, *, mode, fullgraph):
+                return compile_forward(forward, backend="eager", fullgraph=fullgraph)
+
+            with patch("torch.compile", side_effect=compile_eager):
+                matcher.compile()
+            torch.testing.assert_close(
+                ref.extract_selected(self.image)[2], self.image + 2
+            )
+
+            ref.features = tiny().eval()
+            with patch("torch.compile", side_effect=compile_eager):
+                matcher.compile()
+            compiled = ref.features.forward
+            calls = []
+            hook = ref.features.register_forward_pre_hook(
+                lambda module, args, kwargs: calls.append(kwargs), with_kwargs=True
+            )
+            self.addCleanup(hook.remove)
+            stock = ref.extract_selected(self.image)
+            self.assertEqual(calls, [{"scales": (1, 2)}])
+            copied = copy.deepcopy(ref)
+            copied_selected = copied.extract_selected(self.image)
+            self.assertEqual(calls[-1], {"scales": (1, 2)})
+            for s in stock:
+                torch.testing.assert_close(copied_selected[s], stock[s], rtol=0, atol=0)
+
+            @wraps(compiled)
+            def custom_forward(image):
+                return compiled(image)
+
+            ref.features.forward = custom_forward
+            selected = ref.extract_selected(self.image)
+            self.assertEqual(calls[-1], {})
+            for s in stock:
+                torch.testing.assert_close(selected[s], stock[s], rtol=0, atol=0)
+
+            dispatch = CustomDispatch().eval()
+            dispatch.layers = copy.deepcopy(ref.features.layers)
+            ref.features = dispatch
+            selected = ref.extract_selected(self.image)
+            self.assertEqual(set(selected), set(stock))
+            for s in stock:
+                torch.testing.assert_close(selected[s], stock[s], rtol=0, atol=0)
+
     def test_selected_preserves_training_child_under_eval_parent(self):
         full = tiny().eval()
         full.layers[9].train()
@@ -156,6 +224,12 @@ class SelectedFeaturesTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             plain.extract_selected(self.image, resize=resize)
 
+        del plain.features
+        plain.extract = lambda img, resize: {1: img, 2: img + 1}
+        selected = plain.extract_selected(self.image, resize=resize)
+        self.assertEqual(set(selected), {1, 2})
+        torch.testing.assert_close(selected[2], self.image + 1)
+
     def test_class_monkeypatched_extract_is_honored(self):
         ref = RoMav2Refiner.__new__(RoMav2Refiner)
         nn.Module.__init__(ref)
@@ -195,26 +269,22 @@ class SelectedFeaturesTest(unittest.TestCase):
 
         context = namedtuple("Context", "fine")
         ref = Extractor()
-        fake = SimpleNamespace(
-            static_lengths=None,
-            transformers=[],
-            refiner=ref,
-            encode_pair=lambda a, b: (a, b, None, None),
-            pair_context=lambda *args: context(None),
+        fake = FlexGlue(
+            weights=None,
+            describe=False,
+            input_dim=8,
+            descriptor_dim=8,
+            search_dim=4,
+            num_heads=2,
+            n_layers=0,
+            mp=None,
+            refine_resize=(8, 8),
         )
-        f = torch.zeros(1, 1, 2, 2)
-        fake.default_conf = FlexGlue.default_conf
-        fake.fixed_conf = FlexGlue.fixed_conf
-        fake.conf = SimpleNamespace(**FlexGlue.default_conf)
-        fake.conf.n_layers = 0
+        fake.refiner = ref
         fake.conf.refine = True
-        fake.conf.describe = False
-        fake.conf.mp = None
-        fake.conf.refine_resize = (8, 8)
-        fake.require_heads = lambda layers: FlexGlue.require_heads(fake, layers)
-        fake.stopping_layers = lambda conf: FlexGlue.stopping_layers(fake, conf)
-        fake.loaded_heads = {0}
-        fake.descriptor = None
+        fake.encode_pair = lambda a, b: (a, b, None, None)
+        fake.pair_context = lambda *args: context(None)
+        f = torch.zeros(1, 1, 2, 2)
         conf = FlexGlue.resolve_conf(fake, {})
         self.assertFalse(conf.refine_selected_features)
         cached = ({1: torch.ones(1)}, {1: torch.zeros(1)})
@@ -261,17 +331,17 @@ class SelectedFeaturesTest(unittest.TestCase):
         nn.Module.__init__(ref)
         ref.features = tiny().eval().cuda()
         ref.scales = (2, 1)
-        ref.features.forward = torch.compile(
-            ref.features.forward, mode="reduce-overhead", fullgraph=True
-        )
         context = namedtuple("Context", "fine")
-        fake = SimpleNamespace(
-            static_lengths=(4096,),
-            transformers=[],
-            refiner=ref,
-            encode_pair=lambda a, b: (a, b, None, None),
-            pair_context=lambda *args: context(None),
+        matcher = FlexGlue(weights=None, describe=False, n_layers=0)
+        matcher.refiner = ref
+        matcher.encode_pair = lambda a, b: (a, b, None, None)
+        matcher.pair_context = lambda *args: context(None)
+        matcher.compile()
+        calls = []
+        hook = ref.features.register_forward_pre_hook(
+            lambda module, args, kwargs: calls.append(kwargs), with_kwargs=True
         )
+        self.addCleanup(hook.remove)
         conf = SimpleNamespace(
             n_layers=0,
             mp=None,
@@ -288,6 +358,7 @@ class SelectedFeaturesTest(unittest.TestCase):
                 for _ in range(3):
                     torch.compiler.cudagraph_mark_step_begin()
                     extract(images[0], resize=(32, 32))
+                self.assertEqual(calls[-1], {"scales": (1, 2, 1)} if selected else {})
                 caches = []
                 for image in images:
                     raw = extract(image, resize=(32, 32))
@@ -309,7 +380,7 @@ class SelectedFeaturesTest(unittest.TestCase):
                         "extract_selected",
                         side_effect=AssertionError("cache missed"),
                     ):
-                        pair = FlexGlue.decode_pair(fake, *inputs, conf)
+                        pair = matcher.decode_pair(*inputs, conf)
                     # Reuse buffers after decode_pair starts another generation.
                     extract(images[0], resize=(32, 32))
                     for i, (cache, expected) in enumerate(zip(caches, saved)):
