@@ -599,10 +599,30 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
                 ValueError, "does not differentiate the codebook"
             ):
                 rgb8_triton.prepare_rgb8(rgb, **options)
-        with torch.no_grad():
-            fused = rgb8_triton.prepare_rgb8(rgb, **options)
-            self.assertFalse(fused.tensor.requires_grad)
-            torch.testing.assert_close(fused.tensor, native.tensor, rtol=0, atol=0)
+        for mode in (torch.no_grad, torch.inference_mode):
+            with self.subTest(mode=mode), mode():
+                fused = rgb8_triton.prepare_rgb8(rgb, **options)
+                self.assertFalse(fused.tensor.requires_grad)
+                torch.testing.assert_close(fused.tensor, native.tensor, rtol=0, atol=0)
+
+    def test_triton_codebook_rejects_forward_ad_under_no_grad(self):
+        from flexglue.utils import rgb8_torch, rgb8_triton
+
+        rgb = np.zeros((2, 3, 3), dtype=np.uint8)
+        table = torch.ones(256, device="cuda")
+        forward_ad = torch.autograd.forward_ad
+        with forward_ad.dual_level(), torch.no_grad():
+            dual = forward_ad.make_dual(table, torch.full_like(table, 2))
+            options = {"target_hw": (2, 3), "codebook_device": dual}
+            native = rgb8_torch.prepare_rgb8(rgb, **options).tensor
+            tangent = forward_ad.unpack_dual(native).tangent
+            torch.testing.assert_close(
+                tangent, torch.full_like(native, 2), rtol=0, atol=0
+            )
+            with self.assertRaisesRegex(
+                ValueError, "does not differentiate the codebook"
+            ):
+                rgb8_triton.prepare_rgb8(rgb, **options)
 
     def test_lazy_negative_codebook_on_side_stream(self):
         from flexglue.utils import _rgb8, rgb8_triton

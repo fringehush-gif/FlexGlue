@@ -121,12 +121,17 @@ def prepare_rgb8(
     host_sampling: bool = False,
 ) -> PreparedDescriptorInput:
     """Prepare an RGB8 descriptor input with an inference-only resize."""
-    if (
-        torch.is_grad_enabled()
-        and isinstance(codebook_device, torch.Tensor)
-        and codebook_device.requires_grad
-    ):
-        raise ValueError("Triton RGB8 preparation does not differentiate the codebook")
+    if isinstance(codebook_device, torch.Tensor):
+        reverse_grad = torch.is_grad_enabled() and codebook_device.requires_grad
+        forward_grad = (
+            not torch.is_inference_mode_enabled()
+            and torch.autograd.forward_ad.unpack_dual(codebook_device).tangent
+            is not None
+        )
+        if reverse_grad or forward_grad:
+            raise ValueError(
+                "Triton RGB8 preparation does not differentiate the codebook"
+            )
     return _prepare_rgb8(
         rgb,
         target_hw=target_hw,
