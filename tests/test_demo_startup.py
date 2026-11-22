@@ -7,23 +7,32 @@ import unittest
 from pathlib import Path
 
 
+def compile_startup(source, filename):
+    lines = []
+    for line in "".join(source).splitlines(keepends=True):
+        if line.strip() == "import torch":
+            break
+        if line.lstrip().startswith(("!", "%")):
+            indent = line[: len(line) - len(line.lstrip())]
+            line = f"{indent}calls.append({line.strip()!r})\n"
+        lines.append(line)
+    else:
+        raise AssertionError("Expected 'import torch' after the notebook setup")
+    return compile("".join(lines), filename, "exec")
+
+
 class DemoStartupTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        notebook = Path(__file__).resolve().parents[1] / "demo.ipynb"
-        cells = json.loads(notebook.read_text())["cells"]
+        cls.notebook = Path(__file__).resolve().parents[1] / "demo.ipynb"
+        cells = json.loads(cls.notebook.read_text(encoding="utf-8"))["cells"]
         startup = next(cell for cell in cells if cell["cell_type"] == "code")
-        lines = []
-        for line in startup["source"]:
-            if line.strip() == "import torch":
-                break
-            if line.lstrip().startswith(("!", "%")):
-                indent = line[: len(line) - len(line.lstrip())]
-                line = f"{indent}calls.append({line.strip()!r})\n"
-            lines.append(line)
-        cls.startup = compile("".join(lines), str(notebook), "exec")
+        cls.source = startup["source"]
 
-    def run_startup(self, dirname, checkout):
+    def run_startup(self, dirname, checkout, source=None):
+        startup = compile_startup(
+            self.source if source is None else source, str(self.notebook)
+        )
         calls = []
         with tempfile.TemporaryDirectory() as folder:
             cwd = Path(folder) / dirname
@@ -34,7 +43,7 @@ class DemoStartupTest(unittest.TestCase):
             previous = Path.cwd()
             try:
                 os.chdir(cwd)
-                exec(self.startup, {"calls": calls})
+                exec(startup, {"calls": calls})
             finally:
                 os.chdir(previous)
         return calls
@@ -54,7 +63,15 @@ class DemoStartupTest(unittest.TestCase):
         self.assert_bootstrap(self.run_startup("FlexGlue", False))
 
     def test_fresh_colab_directory_bootstraps(self):
-        self.assert_bootstrap(self.run_startup("content", False))
+        source = "".join(self.source)
+        cutoff = len(source) // 2
+        for layout, serialized in (
+            ("as stored", self.source),
+            ("single string", source),
+            ("multiline fragments", [source[:cutoff], source[cutoff:]]),
+        ):
+            with self.subTest(layout=layout):
+                self.assert_bootstrap(self.run_startup("content", False, serialized))
 
 
 if __name__ == "__main__":
