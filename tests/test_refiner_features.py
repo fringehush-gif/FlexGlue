@@ -358,6 +358,30 @@ class RefinerSpatialContractTest(unittest.TestCase):
                 self.assertTrue(torch.isfinite(warp).all())
                 self.assertTrue(torch.isfinite(logits).all())
 
+    def test_first_block_hook_preserves_hidden_blocks_for_the_current_call(self):
+        model = ConvRefiner(2, 2, 2, radius=1, hidden_blocks=1).eval()
+        inputs = (
+            torch.randn(1, 3, 5, 2, requires_grad=True),
+            torch.randn(1, 3, 5, 2, requires_grad=True),
+            torch.zeros(1, 3, 5, 2, requires_grad=True),
+            torch.zeros(1, 3, 5, 1, requires_grad=True),
+        )
+        expected = model(*inputs, (1.0, 1.0))
+        expected_grads = torch.autograd.grad(
+            expected[0].sum() + expected[1].sum(), inputs
+        )
+        replacement = nn.Identity()
+
+        def replace_hidden_blocks(module, args, output):
+            model.hidden_blocks = replacement
+
+        with model.block1.register_forward_hook(replace_hidden_blocks):
+            actual = model(*inputs, (1.0, 1.0))
+        self.assertIs(model.hidden_blocks, replacement)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        actual_grads = torch.autograd.grad(actual[0].sum() + actual[1].sum(), inputs)
+        torch.testing.assert_close(actual_grads, expected_grads, rtol=0, atol=0)
+
 
 if __name__ == "__main__":
     unittest.main()
