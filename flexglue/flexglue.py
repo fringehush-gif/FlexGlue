@@ -444,6 +444,10 @@ class FlexGlue(nn.Module):
         error = (back_ii - ops.denormalize_keypoints(points_ni, size_i)).norm(dim=-1)
         return error, back_confidence
 
+    # Keep the original methods for the dense fast-path dispatch check.
+    _dense_cycle_original = cycle_error
+    _dense_sample_original = sample_correspondences
+
     def to_resized(self, points: torch.Tensor, data_i: dict) -> torch.Tensor:
         """Points (B, ..., 2) from pixels of image i to descriptor input pixels."""
         scale = data_i["resized_size"] / data_i["image_size"]
@@ -495,14 +499,36 @@ class FlexGlue(nn.Module):
             valid &= ops.inside_border(dense_p2di_ri, size_i, border)
             valid &= ops.inside_border(dense_p2di_rj, size_j, border)
             if ops.is_set(conf.max_distance_px):
-                # Dense gating only consumes the round-trip location.
-                back_ni = ops.sample_features(
-                    ops.to_chw(pred[f"dense_p2d{j}_n{i}"]),
-                    dense_p2di_nj.flatten(1, 2),
-                )
-                back_ri = ops.denormalize_keypoints(back_ni, size_i)
-                err = (back_ri - dense_p2di_ri.flatten(1, 2)).norm(dim=-1)
-                del back_ni, back_ri
+                cycle = self.cycle_error
+                sample = self.sample_correspondences
+                if (
+                    getattr(cycle, "__func__", None) is FlexGlue._dense_cycle_original
+                    and getattr(cycle, "__self__", None) is self
+                    and getattr(sample, "__func__", None)
+                    is FlexGlue._dense_sample_original
+                    and getattr(sample, "__self__", None) is self
+                ):
+                    # Dense gating only consumes the round-trip location.
+                    back_ni = ops.sample_features(
+                        ops.to_chw(pred[f"dense_p2d{j}_n{i}"]),
+                        dense_p2di_nj.flatten(1, 2),
+                    )
+                    back_ri = ops.denormalize_keypoints(back_ni, size_i)
+                    err = (back_ri - dense_p2di_ri.flatten(1, 2)).norm(dim=-1)
+                    del back_ni, back_ri
+                else:
+                    dense_j = {
+                        "dense_p2di_nj": pred[f"dense_p2d{j}_n{i}"],
+                        "dense_confidencei": pred[f"dense_confidence{j}"],
+                    }
+                    err = cycle(
+                        context,
+                        i,
+                        dense_p2di_ni.flatten(1, 2),
+                        dense_p2di_nj.flatten(1, 2),
+                        size_i,
+                        dense_j,
+                    )[0]
                 valid &= err.view_as(dense_confidence) < conf.max_distance_px
             pred[f"dense_valid{i}"] = valid
             pred[f"dense_confidence{i}"] = torch.where(valid, dense_confidence, 0)

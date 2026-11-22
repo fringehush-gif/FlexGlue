@@ -1,5 +1,7 @@
 import unittest
-from types import SimpleNamespace
+from contextlib import nullcontext
+from types import MethodType, SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -8,6 +10,88 @@ from flexglue.utils import ops
 
 
 class DenseCycleTest(unittest.TestCase):
+    def test_dense_gate_respects_cycle_and_sampling_overrides(self):
+        class CycleOverride(FlexGlue):
+            def cycle_error(self, context, i, points, target, size, dense=None):
+                self.calls.append(i)
+                return points.new_full(points.shape[:-1], 100), points.new_ones(
+                    points.shape[:-1]
+                )
+
+        class SamplingOverride(FlexGlue):
+            def sample_correspondences(self, dense, points):
+                self.calls.append(points.shape[1])
+                return points.new_full(points.shape, 2), points.new_ones(
+                    points.shape[:-1]
+                )
+
+        cases = (
+            (CycleOverride, nullcontext(), False),
+            (SamplingOverride, nullcontext(), False),
+            (
+                FlexGlue,
+                patch.object(FlexGlue, "cycle_error", CycleOverride.cycle_error),
+                False,
+            ),
+            (
+                FlexGlue,
+                patch.object(
+                    FlexGlue,
+                    "sample_correspondences",
+                    SamplingOverride.sample_correspondences,
+                ),
+                False,
+            ),
+            (FlexGlue, nullcontext(), True),
+        )
+        for cls, override, rebound in cases:
+            with self.subTest(
+                override=cls.__name__, patch=type(override).__name__, rebound=rebound
+            ), override:
+                model = cls(
+                    weights=None,
+                    describe=False,
+                    input_dim=4,
+                    descriptor_dim=8,
+                    search_dim=4,
+                    num_heads=2,
+                    n_layers=0,
+                ).eval()
+                model.calls = []
+                calls = model.calls
+                if rebound:
+                    other = SamplingOverride(
+                        weights=None,
+                        describe=False,
+                        input_dim=4,
+                        descriptor_dim=8,
+                        search_dim=4,
+                        num_heads=2,
+                        n_layers=0,
+                    ).eval()
+                    other.calls = []
+                    calls = other.calls
+                    model.cycle_error = MethodType(FlexGlue.cycle_error, other)
+                size = torch.tensor([[16.0, 16.0]])
+                data = {"image_size": size, "resized_size": size}
+                warp = ops.cell_centers(2, 2, (2, 2)).view(1, 2, 2, 2)
+                pred = {}
+                for i, j in ((0, 1), (1, 0)):
+                    pred[f"dense_p2d{i}_n{j}"] = warp.clone()
+                    pred[f"dense_p2d{i}_i{j}"] = ops.denormalize_keypoints(warp, size)
+                    pred[f"dense_confidence{i}"] = torch.ones(1, 2, 2)
+                conf = SimpleNamespace(**{**model.default_conf, "max_distance_px": 1.0})
+                result = model.gate_dense(
+                    pred,
+                    SimpleNamespace(covisibility_score=torch.ones(1)),
+                    data,
+                    data,
+                    conf,
+                )
+                self.assertEqual(len(calls), 2)
+                for i in (0, 1):
+                    self.assertFalse(result[f"dense_valid{i}"].any())
+
     @torch.inference_mode()
     def test_cycle_gate_with_different_grid_and_image_sizes(self):
         model = FlexGlue(
@@ -70,7 +154,9 @@ class DenseCycleTest(unittest.TestCase):
             torch.testing.assert_close(
                 (error < conf.max_distance_px).view_as(expected[i]), expected[i]
             )
-        result = model.gate_dense(dict(pred), context, *data, conf)
+        with patch.object(ops, "sample_features", wraps=ops.sample_features) as sample:
+            result = model.gate_dense(dict(pred), context, *data, conf)
+        self.assertEqual(sample.call_count, 2)  # one location sample per direction
         for i in (0, 1):
             torch.testing.assert_close(result[f"dense_valid{i}"], expected[i])
             torch.testing.assert_close(
