@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .descriptor import DINOv3Descriptor
-from .refiner import RoMav2Refiner
+from .refiner import VGG19BN, RoMav2Refiner
 from .utils import ops
 from .utils import preprocess as pp
 from .utils.modules import (
@@ -203,9 +203,16 @@ class FlexGlue(nn.Module):
                 self.descriptor.encode, mode="default", fullgraph=True
             )
         if self.refiner is not None:
-            self.refiner.features.forward = _compile_method(
-                self.refiner.features.forward, mode=mode, fullgraph=True
+            features = self.refiner.features
+            selectable = (
+                type(features) is VGG19BN and features._has_selectable_forward()
             )
+            features.forward = _compile_method(
+                features.forward, mode=mode, fullgraph=True
+            )
+            # A later decorator may copy metadata, so remember the exact wrapper.
+            if selectable:
+                features._compiled_stock_forward = features.forward
             self.refiner.forward = _compile_method(
                 self.refiner.forward, mode=mode, fullgraph=True
             )
