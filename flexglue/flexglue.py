@@ -90,6 +90,13 @@ class FlexGlue(nn.Module):
         static_lengths: Tuple[int, ...] = (512, 1024, 2048, 4096),
     ) -> "FlexGlue":
         """Compile the encoder, transformer layers, heads and optional refiners."""
+        if not callable(
+            getattr(getattr(torch, "compiler", None), "cudagraph_mark_step_begin", None)
+        ):
+            raise RuntimeError(
+                "FlexGlue.compile() requires PyTorch >= 2.2 with "
+                "torch.compiler.cudagraph_mark_step_begin()."
+            )
         if self.descriptor is not None:
             self.descriptor.forward = torch.compile(
                 self.descriptor.forward, mode="default", fullgraph=True
