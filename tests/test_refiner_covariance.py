@@ -1,269 +1,178 @@
-"""Regression tests for refinement precision mixing and covariance."""
+"""Inversion checks against the precision stored by the stock refiner."""
+
+import math
 import unittest
-from decimal import Decimal, localcontext
-from fractions import Fraction
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
-from flexglue.refiner import (
-    ConvRefiner,
-    RoMav2Refiner,
-    _covariance_factor,
-    _interpolate_precision_factor,
-)
+from flexglue.refiner import ConvRefiner, RoMav2Refiner
 
 
-def decimal(value):
-    if isinstance(value, Fraction):
-        return Decimal(value.numerator) / Decimal(value.denominator)
-    if isinstance(value, Decimal):
-        return value
-    return Decimal.from_float(float(value))
+def legacy_covariance(precision, scale):
+    p00, p10, p11 = precision.unbind(-1)
+    adjugate = torch.stack([p11, -p10, -p10, p00], -1).unflatten(-1, (2, 2))
+    cov = adjugate / (p00 * p11 - p10 * p10)[..., None, None]
+    return cov * scale[..., :, None] * scale[..., None, :]
 
 
-def covariance_reference(terms, scale=(1, 1)):
-    """Invert a weighted precision sum without subtracting its determinant."""
-    with localcontext() as ctx:
-        ctx.prec = 100
-        terms = [(decimal(w), tuple(map(decimal, factor))) for w, factor in terms]
-        p00 = sum((w * a * a for w, (a, b, c) in terms), Decimal(0))
-        p01 = sum((w * a * b for w, (a, b, c) in terms), Decimal(0))
-        p11 = sum((w * (b * b + c * c) for w, (a, b, c) in terms), Decimal(0))
-        det = sum((w * w * a * a * c * c for w, (a, b, c) in terms), Decimal(0))
-        for i, (wi, (a, b, c)) in enumerate(terms):
-            for wj, (d, e, f) in terms[i + 1 :]:
-                det += wi * wj * ((a * e - d * b) ** 2 + (a * f) ** 2 + (d * c) ** 2)
-        sx, sy = map(decimal, scale)
-        return (
-            (sx * sx * p11 / det, -sx * sy * p01 / det),
-            (-sx * sy * p01 / det, sy * sy * p00 / det),
-        )
-
-
-def bilinear_terms(source, y, x, size):
-    h, w = source.shape[1:3]
-    py = max(
-        Fraction(0),
-        min(
-            Fraction(h - 1),
-            Fraction(2 * y + 1, 2) * Fraction(h, size[0]) - Fraction(1, 2),
-        ),
+def stock_refiner(n, device):
+    model = RoMav2Refiner.__new__(RoMav2Refiner)
+    nn.Module.__init__(model)
+    model.scales = (2, 1)
+    model.refiners = nn.ModuleDict(
+        {str(s): ConvRefiner(*model.configs[s]) for s in model.scales}
     )
-    px = max(
-        Fraction(0),
-        min(
-            Fraction(w - 1),
-            Fraction(2 * x + 1, 2) * Fraction(w, size[1]) - Fraction(1, 2),
-        ),
-    )
-    y0, x0 = py.numerator // py.denominator, px.numerator // px.denominator
-    wy, wx = py - y0, px - x0
-    return [
-        (ay * ax, source[0, iy, ix].tolist())
-        for iy, ay in ((y0, 1 - wy), (min(y0 + 1, h - 1), wy))
-        for ix, ax in ((x0, 1 - wx), (min(x0 + 1, w - 1), wx))
-    ]
+    model = model.to(device).eval()
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+        biases = {
+            "2": (0.2, n, n - 1, -100),
+            "1": (0.2, math.log(math.expm1(1 - 1e-6)), 1, -100),
+        }
+        for stride, bias in biases.items():
+            target = model.refiners[stride].confidence_head.bias
+            target.copy_(target.new_tensor(bias))
+    features = {
+        s: torch.zeros(1, 6 // s, 6 // s, model.configs[s][0], device=device)
+        for s in model.scales
+    }
+    return model, features
+
+
+def refine_precision(precision, size=None):
+    class TensorRefiner(RoMav2Refiner):
+        def __init__(self):
+            nn.Module.__init__(self)
+
+        def forward(self, feats_i, feats_j, warp, logits):
+            return warp, torch.cat((logits[..., None], precision), -1)
+
+    batch, h, w = precision.shape[:3]
+    shape = (batch, h, w)
+    features = {1: precision.new_empty((*shape, 1))}
+    if size is None:
+        size = precision.new_tensor([w, h]).expand(batch, -1)
+    return TensorRefiner().refine(
+        precision.new_zeros((*shape, 2)),
+        precision.new_zeros(shape),
+        features,
+        features,
+        size,
+    )["dense_covi_ij"]
 
 
 class RefinerCovarianceTest(unittest.TestCase):
-    def assert_covariance(
-        self, actual, reference, directions, weak_tol=2e-6, tol=2e-12
-    ):
-        self.assertEqual(actual.dtype, torch.float64)
-        self.assertTrue(bool(torch.isfinite(actual).all()))
-        with localcontext() as ctx:
-            ctx.prec = 100
-            got = tuple(tuple(decimal(v) for v in row) for row in actual.tolist())
-            error = sum(
-                (got[i][j] - reference[i][j]) ** 2 for i in range(2) for j in range(2)
-            )
-            norm = sum(v * v for row in reference for v in row)
-            self.assertLessEqual((error / norm).sqrt(), decimal(tol))
-            for i in range(2):
-                for j in range(2):
-                    self.assertLessEqual(
-                        abs(got[i][j] - reference[i][j]),
-                        decimal(tol) * (1 + abs(reference[i][j])),
-                    )
-            self.assertGreater(got[0][0], 0)
-            self.assertGreater(got[0][0] * got[1][1] - got[0][1] * got[1][0], 0)
-            for direction in directions:
-                v = tuple(map(decimal, direction))
-                q = sum(v[i] * got[i][j] * v[j] for i in range(2) for j in range(2))
-                expected = sum(
-                    v[i] * reference[i][j] * v[j] for i in range(2) for j in range(2)
-                )
-                self.assertLessEqual(
-                    abs(q - expected), decimal(weak_tol) * (1 + abs(expected))
-                )
+    def test_actual_stages_return_finite_correct_covariance(self):
+        devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
+        for device in devices:
+            for n, stored in ((100, (10001, 9901, 9802)), (65, (4226, 4161, 4097))):
+                with self.subTest(n=n, device=device), torch.inference_mode():
+                    model, features = stock_refiner(n, device)
+                    warp = torch.zeros(1, 1, 1, 2, device=device)
+                    logits = torch.zeros(1, 1, 1, device=device)
+                    size = torch.tensor([[6, 6]], device=device)
+                    stage_calls = []
 
-    @staticmethod
-    def tiny_refiner(last):
-        ref = RoMav2Refiner.__new__(RoMav2Refiner)
-        nn.Module.__init__(ref)
-        ref.scales = (2, 1)
-        ref.refiners = nn.ModuleDict(
-            {str(s): ConvRefiner(2, 2, 2, None, hidden_blocks=0) for s in ref.scales}
-        )
-        with torch.no_grad():
-            for stage in ref.refiners.values():
-                for parameter in stage.parameters():
-                    parameter.zero_()
-                stage.confidence_head.bias.copy_(torch.tensor([0.2, 0.0, 1.0, last]))
-        return ref.eval()
+                    def observe(_stage, inputs, outputs):
+                        self.assertIsInstance(inputs[3], torch.Tensor)
+                        self.assertIsInstance(outputs[1], torch.Tensor)
+                        stage_calls.append(inputs[3].shape[-1])
 
-    def test_actual_two_stage_adverse_precision(self):
-        for last in (-9.0, -10.0):
-            for size in ((13, 20), (19, 14)):
-                with self.subTest(last=last, size=size):
-                    ref = self.tiny_refiner(last)
-                    raw = []
-                    hooks = [
-                        stage.confidence_head.register_forward_hook(
-                            lambda module, inputs, output: raw.append(
-                                output.detach().permute(0, 2, 3, 1)
-                            )
-                        )
-                        for stage in ref.refiners.values()
+                    handles = [
+                        stage.register_forward_hook(observe)
+                        for stage in model.refiners.values()
                     ]
-                    features = {1: torch.zeros(1, 6, 6, 2), 2: torch.zeros(1, 3, 3, 2)}
                     try:
-                        with torch.no_grad():
-                            out = ref.refine(
-                                torch.zeros(1, 2, 2, 2),
-                                torch.zeros(1, 2, 2),
-                                features,
-                                features,
-                                torch.tensor([size]),
-                            )
+                        _, packed = model(features, features, warp, logits)
+                        p, q, r = stored
+                        torch.testing.assert_close(
+                            packed[..., 1:],
+                            packed.new_tensor(stored).expand(1, 6, 6, 3),
+                            rtol=0,
+                            atol=0,
+                        )
+                        out = model.refine(warp, logits, features, features, size)
                     finally:
-                        for hook in hooks:
-                            hook.remove()
-                    self.assertEqual(len(raw), 2)
-                    factors = [
-                        torch.stack(
-                            (
-                                F.softplus(d[..., 1]) + 1e-6,
-                                d[..., 2],
-                                F.softplus(d[..., 3]) + 1e-6,
-                            ),
-                            -1,
-                        )
-                        for d in raw
-                    ]
-                    # Packing these FP32 factors loses the positive minor term.
-                    for factor in factors:
-                        self.assertTrue(
-                            torch.equal(
-                                factor[..., 1].square() + factor[..., 2].square(),
-                                factor[..., 1].square(),
-                            )
-                        )
-                    scale = (Fraction(size[0], 6), Fraction(size[1], 6))
-                    with localcontext() as ctx:
-                        ctx.prec = 100
-                        for y in range(6):
-                            for x in range(6):
-                                terms = bilinear_terms(factors[0], y, x, (6, 6))
-                                terms.append(
-                                    (Fraction(1), factors[1][0, y, x].tolist())
-                                )
-                                reference = covariance_reference(terms, scale)
-                                a, b, _ = terms[-1][1]
-                                weak = (
-                                    decimal(a) / decimal(scale[0]),
-                                    decimal(b) / decimal(scale[1]),
-                                )
-                                self.assert_covariance(
-                                    out["dense_covi_ij"][0, y, x], reference, [weak]
-                                )
+                        for handle in handles:
+                            handle.remove()
+                    self.assertEqual(stage_calls, [1, 4, 1, 4])
+                    expected = packed.new_tensor([[r, -q], [-q, p]]).expand(
+                        1, 6, 6, 2, 2
+                    )
+                    torch.testing.assert_close(
+                        out["dense_covi_ij"], expected, rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        out["dense_confidencei"],
+                        packed[..., 0].sigmoid(),
+                        rtol=0,
+                        atol=0,
+                    )
 
-    def test_nonuniform_bilinear_precision_transport(self):
-        source = torch.tensor(
-            [
-                [
-                    [[1.25, 0.3, 0.7], [0.6, -0.8, 1.1], [1.5, 0.5, 0.8]],
-                    [[0.9, 0.4, 0.6], [1.2, -0.6, 0.5], [0.7, 0.2, 1.3]],
-                ]
-            ],
-            dtype=torch.float64,
-        )
-        moved = _interpolate_precision_factor(source, (5, 7))
-        for y in range(5):
-            for x in range(7):
-                reference = covariance_reference(bilinear_terms(source, y, x, (5, 7)))
-                factor = _covariance_factor(
-                    moved[0, y, x], torch.ones(2, dtype=torch.float64)
-                )
-                self.assert_covariance(
-                    factor @ factor.mT,
-                    reference,
-                    [(1, 0), (0, 1), (0.7, -0.4)],
-                    weak_tol=2e-12,
-                    tol=3e-13,
-                )
-
-    def test_tensor_only_stage_hook_requires_migration(self):
-        features = {1: torch.zeros(1, 6, 6, 2), 2: torch.zeros(1, 3, 3, 2)}
-        for scale in (2, 1):
-            with self.subTest(scale=scale):
-                ref = self.tiny_refiner(-9.0)
-                hook = ref.refiners[str(scale)].register_forward_hook(
-                    lambda module, inputs, output: (output[0], output[1].logits)
-                )
-                try:
-                    with torch.no_grad(), self.assertRaisesRegex(
-                        TypeError, "internal uncertainty state"
-                    ):
-                        ref.refine(
-                            torch.zeros(1, 2, 2, 2),
-                            torch.zeros(1, 2, 2),
-                            features,
-                            features,
-                            torch.tensor([[13, 20]]),
-                        )
-                finally:
-                    hook.remove()
-
-    def test_direct_stage_tensor_contract(self):
-        stage = ConvRefiner(2, 2, 2, None, hidden_blocks=0).eval()
-        with torch.no_grad():
-            for parameter in stage.parameters():
-                parameter.zero_()
-            stage.confidence_head.bias.copy_(torch.tensor([0.25, 0.0, 1.0, -9.0]))
-        features = torch.zeros(1, 2, 3, 2)
-        warp = torch.zeros(1, 2, 3, 2)
-        logits = torch.full((1, 2, 3, 1), 0.1, requires_grad=True)
-        raw = []
-        hook = stage.confidence_head.register_forward_hook(
-            lambda module, inputs, output: raw.append(output.permute(0, 2, 3, 1))
-        )
-        try:
-            output_warp, output_logits = stage(
-                features, features, warp, logits, (1.0, 1.0)
+    def test_mixed_ordinary_and_rescued_values_and_gradients(self):
+        ordinary = torch.tensor([3.2, 0.35, 2.1], requires_grad=True)
+        rescued = torch.tensor([4226.0, 4161.0, 4097.0], requires_grad=True)
+        rows = torch.stack((ordinary, rescued)).reshape(1, 1, 2, 3)
+        scale = torch.tensor([1.75, 2.25])
+        position_size = (scale * torch.tensor([2, 1]))[None].double()
+        actual = refine_precision(rows, position_size).reshape(2, 2, 2)
+        expected = torch.stack(
+            (
+                legacy_covariance(ordinary, scale.double()),
+                legacy_covariance(rescued.double(), scale.double()),
             )
-        finally:
-            hook.remove()
-        self.assertIsInstance(output_warp, torch.Tensor)
-        self.assertIsInstance(output_logits, torch.Tensor)
-        self.assertTrue(torch.equal(output_warp, warp))
-        self.assertEqual(len(raw), 1)
-        d = raw[0]
-        a = F.softplus(d[..., 1]) + 1e-6
-        b = d[..., 2]
-        c = F.softplus(d[..., 3]) + 1e-6
-        packed = torch.stack((d[..., 0], a * a, a * b, b * b + c * c), -1)
-        expected = F.pad(logits, (0, 3)) + packed
-        torch.testing.assert_close(output_logits, expected, rtol=0, atol=0)
-        variables = (logits, stage.confidence_head.bias)
-        actual_grad = torch.autograd.grad(
-            output_logits.square().sum(), variables, retain_graph=True
         )
-        expected_grad = torch.autograd.grad(expected.square().sum(), variables)
-        for actual, reference in zip(actual_grad, expected_grad):
-            torch.testing.assert_close(actual, reference, rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        actual_grad = torch.autograd.grad(actual.sum(), (ordinary, rescued))
+        expected_grad = torch.autograd.grad(expected.sum(), (ordinary, rescued))
+        self.assertTrue(all(value.isfinite().all() for value in actual_grad))
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-6, atol=0)
+
+    def test_determinant_range_and_non_fp32_contract(self):
+        large, small = 2.0**100, 2.0**-100
+        precision = torch.tensor([[[[large, 0, large], [small, 0, small]]]])
+        expected = torch.diag_embed(precision[..., [0, 2]].reciprocal())
+        torch.testing.assert_close(
+            refine_precision(precision), expected, rtol=0, atol=0
+        )
+        for dtype in (torch.float16, torch.float64):
+            value = torch.tensor([[[[1.5, 0.5, 2.0]]]], dtype=dtype)
+            expected = legacy_covariance(value, value.new_ones(2))
+            torch.testing.assert_close(
+                refine_precision(value), expected, rtol=0, atol=0
+            )
+
+    def test_corrected_scaling_has_finite_size_gradients(self):
+        large = 2.0**100
+        precision = torch.tensor([[[[large, 0.0, large]]]])
+        size = torch.full((1, 2), 2.0**40, requires_grad=True)
+        covariance = refine_precision(precision, size)
+        expected = torch.eye(2).reshape(1, 1, 1, 2, 2) * 2.0**-20
+        torch.testing.assert_close(covariance, expected, rtol=0, atol=0)
+        covariance.sum().backward()
+        torch.testing.assert_close(
+            size.grad, torch.full_like(size, 2.0**-59), rtol=0, atol=0
+        )
+
+    def test_already_singular_precision_is_not_reinterpreted(self):
+        precision = torch.tensor([[[[1.0, 1.0, 1.0]]]])
+        expected = legacy_covariance(precision, precision.new_ones(2))
+        torch.testing.assert_close(
+            refine_precision(precision), expected, rtol=0, atol=0, equal_nan=True
+        )
+
+    def test_forward_gradient_under_no_grad(self):
+        precision = torch.tensor([[[[4226.0, 4161.0, 4097.0]]]])
+        direction = torch.tensor([[[[1.0, 0.0, 0.0]]]])
+        forward_ad = torch.autograd.forward_ad
+        with forward_ad.dual_level(), torch.no_grad():
+            dual = forward_ad.make_dual(precision, direction)
+            cov, tangent = forward_ad.unpack_dual(refine_precision(dual))
+            column = cov[..., :1].double()
+            expected = -(column @ column.mT)
+            torch.testing.assert_close(tangent, expected.float(), rtol=0, atol=0)
 
 
 if __name__ == "__main__":
