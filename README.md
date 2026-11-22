@@ -308,7 +308,7 @@ For keypoint-less matching, you can specify a maximum number of samples (corresp
 pred = matcher.match_pair(image0, image1, max_num_samples=1024)
 ```
 
-FlexGlue can be compiled with `torch.compile`, as LightGlue:
+FlexGlue can be compiled with `torch.compile`, as LightGlue. Built-in compilation requires the public CUDA graph step API available in PyTorch 2.2 and newer:
 ```python
 matcher = FlexGlue().eval().cuda().compile(mode="reduce-overhead")
 ```
