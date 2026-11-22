@@ -2,7 +2,7 @@ import copy
 import importlib.util
 import unittest
 from collections import namedtuple
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -179,6 +179,32 @@ class SelectedFeaturesTest(unittest.TestCase):
         self.assertEqual(set(selected), {1, 2})
         for stride in selected:
             torch.testing.assert_close(selected[stride], full[stride], rtol=0, atol=0)
+
+    def test_extract_bound_to_another_refiner_is_honored(self):
+        refs = []
+        for _ in range(2):
+            ref = RoMav2Refiner.__new__(RoMav2Refiner)
+            nn.Module.__init__(ref)
+            ref.features = tiny().eval()
+            ref.scales = (2, 1)
+            refs.append(ref)
+        ref, other = refs
+        ref.extract = MethodType(RoMav2Refiner.extract, other)
+        captured = []
+        handle = other.features.register_forward_hook(
+            lambda module, args, output: captured.append(output)
+        )
+        self.addCleanup(handle.remove)
+        with patch("flexglue.refiner.pp.resize_images", side_effect=lambda x, _: x):
+            expected = ref.extract(self.image, resize=(8, 8))
+            selected = ref.extract_selected(self.image, resize=(8, 8))
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(set(selected), {1, 2})
+        for stride in selected:
+            self.assertIs(selected[stride], captured[-1][stride])
+            torch.testing.assert_close(
+                selected[stride], expected[stride], rtol=0, atol=0
+            )
 
     def test_decode_default_override_opt_in_and_cache(self):
         class Extractor:

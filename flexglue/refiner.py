@@ -221,7 +221,10 @@ class RoMav2Refiner(nn.Module):
         """
         scales = (1, *self.scales)
         extract = self.extract
-        if getattr(extract, "__func__", None) is not RoMav2Refiner._stock_extract:
+        if (
+            getattr(extract, "__func__", None) is not RoMav2Refiner._stock_extract
+            or getattr(extract, "__self__", None) is not self
+        ):
             features = extract(img, resize=resize)
             return {s: features[s] for s in scales}
         return self.features(pp.resize_images(img, resize), scales=scales)
