@@ -583,6 +583,27 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
     "set FLEXGLUE_TEST_RGB8_CUDA=1 for optional Linux CUDA checks",
 )
 class RGB8CudaTest(PacketAssertions, unittest.TestCase):
+    def test_triton_codebook_grad_requires_no_grad_mode(self):
+        from flexglue.utils import rgb8_torch, rgb8_triton
+
+        rgb = np.zeros((2, 3, 3), dtype=np.uint8)
+        table = torch.ones(256, device="cuda", requires_grad=True)
+        options = {"target_hw": (2, 3), "codebook_device": table}
+        with torch.enable_grad():
+            native = rgb8_torch.prepare_rgb8(rgb, **options)
+            native.tensor.sum().backward()
+            expected_grad = torch.zeros_like(table)
+            expected_grad[0] = rgb.size
+            torch.testing.assert_close(table.grad, expected_grad, rtol=0, atol=0)
+            with self.assertRaisesRegex(
+                ValueError, "does not differentiate the codebook"
+            ):
+                rgb8_triton.prepare_rgb8(rgb, **options)
+        with torch.no_grad():
+            fused = rgb8_triton.prepare_rgb8(rgb, **options)
+            self.assertFalse(fused.tensor.requires_grad)
+            torch.testing.assert_close(fused.tensor, native.tensor, rtol=0, atol=0)
+
     def test_lazy_negative_codebook_on_side_stream(self):
         from flexglue.utils import _rgb8, rgb8_triton
 
