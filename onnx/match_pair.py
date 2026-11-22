@@ -28,6 +28,7 @@ Usage (from the root of the repository):
 
 import argparse
 import hashlib
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -70,12 +71,18 @@ def get_model(name: str, model_dir: Path) -> Path:
     if not path.exists():
         model_dir.mkdir(parents=True, exist_ok=True)
         print(f"Downloading {RELEASE_URL + name} to {path}")
-        tmp = path.with_suffix(".tmp")
-        urllib.request.urlretrieve(RELEASE_URL + name, tmp)
-        if sha256sum(tmp) != MODELS[name]:
-            tmp.unlink()
-            raise RuntimeError(f"Checksum mismatch for {name}.")
-        tmp.rename(path)
+        with tempfile.TemporaryDirectory(dir=model_dir) as tmpdir:
+            tmp = Path(tmpdir) / name
+            urllib.request.urlretrieve(RELEASE_URL + name, tmp)
+            if sha256sum(tmp) != MODELS[name]:
+                raise RuntimeError(f"Checksum mismatch for {name}.")
+            if not path.is_file():
+                try:
+                    tmp.replace(path)
+                except PermissionError:
+                    # Another caller may have published and opened the model.
+                    if not path.is_file():
+                        raise
     return path
 
 
