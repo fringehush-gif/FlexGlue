@@ -118,6 +118,19 @@ class ONNXCheckTest(unittest.TestCase):
         debug["p2d0_i1"].fill(np.inf)
         self.assertTrue(self.check.compare_points(self.pred, debug, self.tol)[0])
 
+    def test_truncated_debug_output_does_not_broadcast(self):
+        pred = {k: v.copy() for k, v in self.pred.items()}
+        # Different keypoint counts across directions are valid.
+        for key in ("p2d1_i0", "confidence1"):
+            pred[key] = pred[key][:, :3]
+        self.assertTrue(self.check.compare_points(pred, pred, self.tol)[0])
+        for key in ("p2d0_i1", "confidence0", "p2d1_i0", "confidence1"):
+            with self.subTest(key=key):
+                debug = {**pred, key: pred[key][:, :1]}
+                accepted, message = self.check.compare_points(pred, debug, self.tol)
+                self.assertFalse(accepted)
+                self.assertIn(key, message)
+
 
 if __name__ == "__main__":
     unittest.main()

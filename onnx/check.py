@@ -256,6 +256,11 @@ def compare_points(pred, debug, tol):
     taking a maximum.
     """
     pairs = (("p2d0_i1", "confidence0"), ("p2d1_i0", "confidence1"))
+    for pair in pairs:
+        for key in pair:
+            expected, actual = pred[key].shape, debug[key].shape
+            if expected != actual:
+                return False, f"shape mismatch for {key}: {expected} vs {actual}"
     px = np.concatenate(
         [np.linalg.norm(debug[p] - pred[p], axis=-1)[pred[c] >= 0.1] for p, c in pairs]
     )
