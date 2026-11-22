@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -71,6 +72,65 @@ class ONNXDownloadTest(unittest.TestCase):
                         ):
                             self.match_pair.get_model(name, cache)
                     self.assertEqual(list(cache.iterdir()), [])
+
+    def test_model_published_during_download_is_preserved(self):
+        name, payload = "model.onnx", b"verified model fixture"
+        published = b"model from the first caller"
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as readers:
+            cache = Path(directory)
+            path = cache / name
+
+            def download(url, destination):
+                Path(destination).write_bytes(payload)
+                path.write_bytes(published)
+                readers.enter_context(path.open("rb"))
+
+            with (
+                patch.dict(
+                    self.match_pair.MODELS, {name: hashlib.sha256(payload).hexdigest()}
+                ),
+                patch.object(self.match_pair.urllib.request, "urlretrieve", download),
+            ):
+                self.assertEqual(self.match_pair.get_model(name, cache), path)
+            self.assertEqual(path.read_bytes(), published)
+            self.assertEqual(list(cache.iterdir()), [path])
+
+    def test_publish_permission_error_requires_an_existing_model(self):
+        name, payload = "model.onnx", b"verified model fixture"
+        for concurrent_publish in (False, True):
+            with self.subTest(concurrent_publish=concurrent_publish):
+                with tempfile.TemporaryDirectory() as directory:
+                    cache = Path(directory)
+                    path = cache / name
+
+                    def download(url, destination):
+                        Path(destination).write_bytes(payload)
+
+                    def replace(_staged, target):
+                        if concurrent_publish:
+                            target.write_bytes(payload)
+                        raise PermissionError("fixture cannot replace destination")
+
+                    with (
+                        patch.dict(
+                            self.match_pair.MODELS,
+                            {name: hashlib.sha256(payload).hexdigest()},
+                        ),
+                        patch.object(
+                            self.match_pair.urllib.request, "urlretrieve", download
+                        ),
+                        patch.object(Path, "replace", replace),
+                    ):
+                        if concurrent_publish:
+                            self.assertEqual(
+                                self.match_pair.get_model(name, cache), path
+                            )
+                        else:
+                            with self.assertRaises(PermissionError):
+                                self.match_pair.get_model(name, cache)
+                    self.assertEqual(
+                        list(cache.iterdir()), [path] if concurrent_publish else []
+                    )
 
     def test_existing_custom_model_is_preserved(self):
         with tempfile.TemporaryDirectory() as directory:

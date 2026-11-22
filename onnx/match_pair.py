@@ -76,7 +76,13 @@ def get_model(name: str, model_dir: Path) -> Path:
             urllib.request.urlretrieve(RELEASE_URL + name, tmp)
             if sha256sum(tmp) != MODELS[name]:
                 raise RuntimeError(f"Checksum mismatch for {name}.")
-            tmp.replace(path)
+            if not path.is_file():
+                try:
+                    tmp.replace(path)
+                except PermissionError:
+                    # Another caller may have published and opened the model.
+                    if not path.is_file():
+                        raise
     return path
 
 
