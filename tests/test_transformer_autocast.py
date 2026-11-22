@@ -279,27 +279,41 @@ class TransformerAutocastTest(unittest.TestCase):
 
         x0 = torch.linspace(-1, 1, 48, device=self.device).reshape(1, 6, 8).bfloat16()
         x1 = torch.linspace(-2, 1, 48, device=self.device).reshape(1, 6, 8).half()
-        expected = (
-            x0.square().float().mT.unflatten(-1, (2, 3)),
-            x1.square().float().mT.unflatten(-1, (3, 2)),
-        )
+
+        def check_tokens(module, tokens):
+            self.assertIs(tokens[0], x0)
+            self.assertIs(tokens[1], x1)
+
         for weighted in (False, True):
-            self.model.transformers[0] = SquareTokens(weighted).to(self.device)
+            block = SquareTokens(weighted).to(self.device)
+            self.model.transformers[0] = block
             for outer, mp in ((None, None), (torch.bfloat16, "float16")):
-                with self.subTest(outer=outer, mp=mp, weighted=weighted), patch.object(
-                    self.model, "encode_pair", return_value=(x0, x1, None, None)
-                ), torch.no_grad(), torch.autocast(
-                    self.device,
-                    dtype=outer or torch.bfloat16,
-                    enabled=outer is not None,
-                ):
-                    context = self.model.decode_pair(
-                        self.data0,
-                        self.data1,
-                        self.model.resolve_conf({"n_layers": 1, "mp": mp}),
+                with self.subTest(outer=outer, mp=mp, weighted=weighted):
+                    with block.register_forward_pre_hook(check_tokens), patch.object(
+                        self.model, "encode_pair", return_value=(x0, x1, None, None)
+                    ), torch.no_grad(), torch.autocast(
+                        self.device,
+                        dtype=outer or torch.bfloat16,
+                        enabled=outer is not None,
+                    ):
+                        context = self.model.decode_pair(
+                            self.data0,
+                            self.data1,
+                            self.model.resolve_conf({"n_layers": 1, "mp": mp}),
+                        )
+
+                    # Autocast can change the precision of the custom operation
+                    # without changing the tokens passed to it.
+                    with torch.no_grad(), torch.autocast(
+                        self.device, dtype=torch.float16, enabled=mp is not None
+                    ):
+                        y0, y1 = block(x0, x1, None, None)
+                    expected = (
+                        y0.float().mT.unflatten(-1, (2, 3)),
+                        y1.float().mT.unflatten(-1, (3, 2)),
                     )
-                for actual, reference in zip(context.cf, expected):
-                    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+                    for actual, reference in zip(context.cf, expected):
+                        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
     def test_projection_pre_hooks_keep_precision_and_gradients(self):
         for outer in (torch.bfloat16, torch.float16):
