@@ -668,6 +668,32 @@ class RGB8CudaTest(PacketAssertions, unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "producer stream"):
             fused.require_current_stream()
 
+    def test_fast_path_retains_stock_preprocessing_resize_contract(self):
+        from flexglue.utils import rgb8_torch
+
+        descriptor = self.descriptor
+        rgb = np.zeros((13, 17, 3), dtype=np.uint8)
+        rebound = tiny_descriptor((512, 512))
+        rebound.edge_divisible_by = 1024
+        for name, resize, overrides in (
+            ("float resize", (512.0, 512.0), {}),
+            ("instance divisor", (512, 512), {"edge_divisible_by": 1024}),
+            ("rebound method", (512, 512), {"preprocess": rebound.preprocess}),
+        ):
+            override = (
+                patch.multiple(descriptor, **overrides) if overrides else nullcontext()
+            )
+            with self.subTest(
+                name=name
+            ), torch.inference_mode(), override, patch.object(
+                rgb8_torch, "prepare_rgb8", side_effect=AssertionError("fast path")
+            ):
+                tensor = numpy_image_to_torch(rgb).cuda()
+                with self.assertRaisesRegex(ValueError, "resize must be"):
+                    descriptor({"image": tensor}, resize=resize)
+                with self.assertRaisesRegex(ValueError, "resize must be"):
+                    descriptor.describe_rgb8(rgb, resize=resize)
+
     def test_custom_preprocess_uses_original_pixels(self):
         from flexglue.utils import rgb8_torch, rgb8_triton
 

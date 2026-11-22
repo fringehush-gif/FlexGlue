@@ -295,10 +295,12 @@ class DINOv3Descriptor(nn.Module):
         resize = self.conf.resize if resize is None else resize
         device = self.mean.device
         pixel_dtype = self.pixel_dtype
+        preprocess = self.preprocess
         supported = (
             pixel_dtype == torch.float32
-            and getattr(self.preprocess, "__func__", None)
+            and getattr(preprocess, "__func__", None)
             is DINOv3Descriptor._stock_preprocess
+            and getattr(preprocess, "__self__", None) is self
             and type(image) is np.ndarray
             and resize == (512, 512)
             and 1 <= image.shape[0] <= 65535
@@ -322,6 +324,7 @@ class DINOv3Descriptor(nn.Module):
             else:
                 from .utils import rgb8_torch as port
         if port is not None:
+            pp.check_resize(resize, self.edge_divisible_by)
             table = self._rgb8_codebook
             if (
                 table is None
