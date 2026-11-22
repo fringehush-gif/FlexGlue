@@ -146,7 +146,10 @@ class FlexGlue(nn.Module):
         conf,
         cycle: bool = True,
     ) -> dict:
-        """Predicted point, confidence and validity of the keypoints, per direction."""
+        """Predicted point, confidence and validity of the keypoints, per direction.
+
+        The cycle confidence has zero reverse-mode gradient at an exact zero product.
+        """
         data = (data0, data1)
         pred = {
             "covisibility_score": context.covisibility_score,
@@ -174,8 +177,18 @@ class FlexGlue(nn.Module):
                     dense.get(j),
                 )
                 pred[f"cycle_error{i}"] = error
-                # geometric mean of the forward and backward confidence
-                confidence = (confidence * back_confidence).sqrt()
+                # Geometric mean of the forward and backward confidence.
+                product = confidence * back_confidence
+                if torch.is_grad_enabled():
+                    # Define a zero gradient at an exact zero product, retaining
+                    # its original value and the sign of zero.
+                    zero = product == 0
+                    safe_product = product.masked_fill(zero, 1)
+                    confidence = torch.where(
+                        zero, product.detach(), safe_product.sqrt()
+                    )
+                else:
+                    confidence = product.sqrt()
             pred[f"confidence{i}"] = confidence
         return self.gate_points(pred, context, data0, data1, conf)
 
