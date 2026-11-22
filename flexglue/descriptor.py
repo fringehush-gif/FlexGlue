@@ -196,6 +196,8 @@ class DINOv3Descriptor(nn.Module):
         host_sampling: bool = False,
     ) -> dict:
         """Describe HWC byte input through the same public forward dispatch."""
+        if not isinstance(image, np.ndarray):
+            raise ValueError("describe_rgb8 expects an HWC RGB8 NumPy image")
         data = {
             "image": image,
             "rgb8_backend": backend,

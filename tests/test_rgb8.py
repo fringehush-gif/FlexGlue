@@ -320,6 +320,7 @@ class RGB8PortableTest(PacketAssertions, unittest.TestCase):
             self.image.astype(np.float32),
             self.image[:, :, 0],
             self.image[:, :, :2],
+            torch.zeros(1, 3, 32, 32),
         ):
             with self.subTest(shape=image.shape, dtype=image.dtype):
                 with self.assertRaisesRegex(ValueError, "HWC RGB8"):

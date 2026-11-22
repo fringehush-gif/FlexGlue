@@ -127,6 +127,29 @@ class DetectorDtypeTest(unittest.TestCase):
                         self.assertTrue(torch.isfinite(pred[f"p2d{i}_n{j}"]).all())
                         self.assertTrue(torch.isfinite(pred[f"confidence{i}"]).all())
 
+    def test_numpy_recovers_exact_size_from_half_detector(self):
+        class Detector(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("anchor", torch.zeros((), dtype=torch.float16))
+
+            def extract(self, image):
+                shape = image.shape[-2:][::-1]
+                return {
+                    "keypoints": image.new_tensor([[[1536, 4]]]),
+                    "image_size": torch.tensor(shape)[None].to(image).float(),
+                }
+
+        image = np.zeros((8, 3073, 3), dtype=np.uint8)
+        matcher = tiny_matcher()
+        with torch.inference_mode(), patch.object(
+            matcher, "match", side_effect=lambda *data, **kw: data
+        ):
+            packets = matcher.match_pair(image, image, detector=Detector())
+        expected = torch.tensor([[3073, 8]], dtype=torch.float32)
+        for packet in packets:
+            torch.testing.assert_close(packet["image_size"], expected, rtol=0, atol=0)
+
     def test_tensor_input_is_not_retyped(self):
         class Detector(nn.Module):
             def __init__(self):
