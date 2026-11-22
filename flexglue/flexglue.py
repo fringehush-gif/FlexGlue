@@ -16,6 +16,7 @@ from .utils.modules import (
     MatchHead,
     PairContext,
     TransformerLayer,
+    _autocast_dtype,
 )
 
 WEIGHTS_URL = "https://github.com/cvg/FlexGlue/releases/download/v0.1/flexglue.pth"
@@ -327,7 +328,18 @@ class FlexGlue(nn.Module):
         x0, x1, enc0, enc1 = self.encode_pair(f0, f1)
         layer, covisibility_score = conf.n_layers, None
         dtype = torch.float16 if conf.mp is None else getattr(torch, conf.mp)
-        with torch.autocast(f0.device.type, dtype, enabled=conf.mp is not None):
+        cache_enabled = None
+        if conf.n_layers and conf.mp is not None:
+            outer_dtype = _autocast_dtype(f0.device.type)
+            # A nested dtype must neither reuse nor replace the outer casts.
+            if outer_dtype is not None and outer_dtype != dtype:
+                cache_enabled = False
+        with torch.autocast(
+            f0.device.type,
+            dtype,
+            enabled=conf.mp is not None,
+            cache_enabled=cache_enabled,
+        ):
             for k, block in enumerate(self.transformers[: conf.n_layers], 1):
                 x0, x1 = block(x0, x1, enc0, enc1)
                 if conf.early_stop_decay is None or k in (1, conf.n_layers):
