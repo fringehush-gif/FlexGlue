@@ -13,6 +13,8 @@ on:
       - "onnx/**"
       - "tests/test_early_stop*.py"
       - "tests/test_onnx*.py"
+      - "tests/test_export*.py"
+      - "tests/test_non_gemm_export.py"
       - "tests/onnx_test_utils.py"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
@@ -22,6 +24,8 @@ on:
       - "onnx/**"
       - "tests/test_early_stop*.py"
       - "tests/test_onnx*.py"
+      - "tests/test_export*.py"
+      - "tests/test_non_gemm_export.py"
       - "tests/onnx_test_utils.py"
       - "requirements.txt"
       - ".github/workflows/onnx_export.yml"
@@ -61,10 +65,12 @@ jobs:
             onnx==1.23.2 onnxscript==0.7.2 onnxruntime==${{ matrix.ort }}
           python -m pip install --no-deps -e .
 
-      - name: Check early-stop and input contracts
+      - name: Check early-stop, input and export contracts
         run: |
           python -m unittest discover -s tests -p 'test_early_stop*.py' -v
           python -m unittest discover -s tests -p 'test_onnx*.py' -v
+          python -m unittest discover -s tests -p 'test_export*.py' -v
+          python -m unittest discover -s tests -p 'test_non_gemm_export.py' -v
 
       - name: Cache the weights
         uses: actions/cache@v4
