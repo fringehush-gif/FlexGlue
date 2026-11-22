@@ -8,6 +8,15 @@ from flexglue.descriptor import ConvNeXtBlock
 
 
 class ConvNeXtLifetimeTest(unittest.TestCase):
+    def test_scripted_block_matches_eager(self):
+        block = ConvNeXtBlock(4).eval()
+        generator = torch.Generator().manual_seed(41)
+        image = torch.rand(1, 4, 5, 14, generator=generator)[..., ::2]
+
+        scripted = torch.jit.script(block)
+
+        torch.testing.assert_close(scripted(image), block(image), rtol=0, atol=0)
+
     def test_pwconv1_hook_rebinding_preserves_inflight_forward_and_gradients(self):
         ref = ConvNeXtBlock(4).double()
         block = copy.deepcopy(ref)
