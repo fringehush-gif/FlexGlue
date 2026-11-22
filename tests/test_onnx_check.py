@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import torch
 
 
 class ONNXCheckTest(unittest.TestCase):
@@ -130,6 +131,71 @@ class ONNXCheckTest(unittest.TestCase):
                 accepted, message = self.check.compare_points(pred, debug, self.tol)
                 self.assertFalse(accepted)
                 self.assertIn(key, message)
+
+    def test_match_outputs_require_full_batch_and_point_shapes(self):
+        pred = {key: value.copy() for key, value in self.pred.items()}
+        pred["matches0"].fill(-1)
+        pred["matching_scores0"].fill(0)
+        outputs = [
+            pred[key].copy()
+            for key in ("matches0", "matching_scores0", "covisibility_score")
+        ]
+        self.assertTrue(self.check.compare_matches(pred, outputs, self.tol)[0])
+        for index in range(3):
+            for kind in ("points", "empty_batch", "extra_batch"):
+                if index == 2 and kind == "points":
+                    continue
+                with self.subTest(index=index, kind=kind):
+                    malformed = [value.copy() for value in outputs]
+                    if kind == "points":
+                        malformed[index] = malformed[index][:, :1]
+                    elif kind == "empty_batch":
+                        malformed[index] = malformed[index][:0]
+                    else:
+                        malformed[index] = np.concatenate([malformed[index]] * 2)
+                    ok, message = self.check.compare_matches(pred, malformed, self.tol)
+                    self.assertFalse(ok)
+                    self.assertIn("shape", message.lower())
+        multiple = {key: value.copy() for key, value in pred.items()}
+        for key in ("matches0", "matching_scores0", "covisibility_score"):
+            multiple[key] = np.concatenate([multiple[key]] * 2)
+        matching_outputs = [
+            multiple[key]
+            for key in ("matches0", "matching_scores0", "covisibility_score")
+        ]
+        self.assertFalse(
+            self.check.compare_matches(multiple, matching_outputs, self.tol)[0]
+        )
+        self.assertFalse(self.check.compare_matches(pred, outputs[:2], self.tol)[0])
+
+    def test_descriptor_output_shape_cannot_broadcast(self):
+        reference = torch.zeros(1, 3, 4, 5)
+        image = torch.zeros(3, 4, 5)
+
+        class Session:
+            def __init__(self, output):
+                self.output = output
+
+            def run(self, *_args):
+                return [self.output]
+
+        with patch.object(self.check.pp, "resize_images", return_value=image[None]):
+            self.assertEqual(
+                self.check.descriptor_error(
+                    Session(reference.numpy()), image, {"features": reference}, (4, 5)
+                ),
+                0,
+            )
+            for output in (
+                reference[:, :1],
+                reference[:0],
+                reference.expand(2, -1, -1, -1),
+            ):
+                with self.subTest(shape=tuple(output.shape)):
+                    error = self.check.descriptor_error(
+                        Session(output.numpy()), image, {"features": reference}, (4, 5)
+                    )
+                    self.assertTrue(np.isinf(error))
 
 
 if __name__ == "__main__":

@@ -175,7 +175,10 @@ def descriptor_error(session, image: torch.Tensor, features, size) -> float:
     # Identical resize in both runtimes.
     x = pp.resize_images(image[None], size)
     features_ort = session.run(None, {"image": x.numpy()})[0]
-    return np.abs(features_ort - features["features"].cpu().numpy()).max()
+    features_pt = features["features"].cpu().numpy()
+    if features_ort.shape != features_pt.shape:
+        return float("inf")
+    return np.abs(features_ort - features_pt).max()
 
 
 def match_pytorch(
@@ -220,6 +223,20 @@ def matcher_feeds(features0, features1, kpts0, kpts1, min_covisibility):
 
 def compare_matches(pred, outputs, tol):
     """Compare the matches, match scores and covisibility scores."""
+    names = ("matches0", "matching_scores0", "covisibility_score")
+    expected = tuple(pred[name].shape for name in names)
+    if (
+        len(expected[0]) != 2
+        or expected[0][0] != 1
+        or expected[1] != expected[0]
+        or expected[2] != (1,)
+    ):
+        return False, f"Unexpected PyTorch output shapes: {expected}"
+    if len(outputs) < len(names):
+        return False, "Missing matcher outputs"
+    for name, actual, shape in zip(names, outputs, expected):
+        if actual.shape != shape:
+            return False, f"Shape mismatch for {name}: {shape} vs {actual.shape}"
     m0_ort, s0_ort, covis_ort = (x[0] for x in outputs[:3])
     m0_pt, s0_pt = pred["matches0"][0], pred["matching_scores0"][0]
     covis_pt = pred["covisibility_score"][0]
