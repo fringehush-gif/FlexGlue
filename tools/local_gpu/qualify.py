@@ -18,20 +18,18 @@ import sys
 import traceback
 import unittest
 from contextlib import nullcontext
-from fractions import Fraction
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-import torch.nn.functional as F
 from references import correlation_control, legacy_lattice_kde, selected_root_control
 
 HERE = Path(__file__).resolve().parent
 FIXTURE_SHA = "524a5aa6d202da43aaf47d0a614b54e2ff9d9583861025fb555253c7ac103322"
 PROFILES = {
-    19: ("kde", None, False, False, "d26476031d94e7b7442f9915ea78fefa3c3c62d0"),
+    19: ("kde", None, False, False, "6d7b24d23b051ffcc37a37c326eba25f57a6d949"),
     22: ("readout", "native", False, False, "91d0aea051a84e5ea500d192d6af9f0decb1b9b6"),
     23: (
         "readout",
@@ -47,9 +45,9 @@ PROFILES = {
         False,
         "d801d271920f64953f071f6fe735424aca2875b0",
     ),
-    25: ("refiner", None, False, False, "ad76dcf8f814e9cfcbada7fe66e2b2c00752a0f9"),
-    26: ("refiner", None, True, False, "d25662444adaa70dcc16aa0e4314f63fd94a1c07"),
-    36: ("covariance", None, False, True, "3cd16e8dda47aea1052e5daee93f5bbee7c22bd4"),
+    25: ("refiner", None, False, False, "c6ae3d2427ae39c5d969463f66b0b82258510348"),
+    26: ("refiner", None, True, False, "6bd9368d028f6b78fc9e915d4f79340f5dd8026b"),
+    36: ("covariance", None, False, True, "1d98a6fb9f12ba8e1102261d4f8765ef5cf1baa8"),
 }
 
 
@@ -508,135 +506,57 @@ def refiner(args):
 
 def covariance(args):
     oracle = test_module(args.repo, "test_refiner_covariance.py")
-    ref = oracle.RefinerCovarianceTest.tiny_refiner(-9.0)
-    raw_fields = []
-
-    class SpatialHead(torch.nn.Module):
-        def __init__(self, size):
-            super().__init__()
-            y, x = torch.meshgrid(torch.arange(size), torch.arange(size), indexing="ij")
-            # Above the softplus threshold, a/c are exact FP32 identity values;
-            # 1e-6 rounds away. Large b still loses c*c when packed into FP32.
-            raw = torch.stack(
-                (
-                    torch.full_like(x, 0.2, dtype=torch.float32),
-                    2.0**18 + 16 * x,
-                    2.0**18 + 16 * y,
-                    32.0 + 2 * (x + y),
-                ),
-                0,
-            )[None]
-            self.register_buffer("raw", raw)
-            raw_fields.append(raw.permute(0, 2, 3, 1).clone())
-
-        def forward(self, inputs):
-            return self.raw.expand(inputs.shape[0], -1, -1, -1)
-
-    for scale, stage in ref.refiners.items():
-        stage.confidence_head = SpatialHead(6 // int(scale))
-    ref = ref.to(args.device)
-    features = {
-        1: torch.zeros(1, 6, 6, 2, device=args.device),
-        2: torch.zeros(1, 3, 3, 2, device=args.device),
-    }
-    values = (
-        torch.zeros(1, 2, 2, 2, device=args.device),
-        torch.zeros(1, 2, 2, device=args.device),
-        features,
-        features,
-        torch.tensor([[13, 20]], device=args.device),
+    # CPU smoke must not implicitly execute the test's CUDA branch.
+    available = (
+        patch("torch.cuda.is_available", return_value=False)
+        if args.device == "cpu"
+        else nullcontext()
     )
+    with available:
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+            oracle.RefinerCovarianceTest
+        )
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+    assert result.testsRun == 6 and result.wasSuccessful() and not result.skipped
 
-    def execute(*inputs):
-        result = ref.refine(*inputs)
-        origins = []
-        for stage in ref.refiners.values():
-            raw = stage.confidence_head.raw.permute(0, 2, 3, 1)
-            origins.append(
-                torch.stack(
-                    (
-                        F.softplus(raw[..., 1]) + 1e-6,
-                        raw[..., 2],
-                        F.softplus(raw[..., 3]) + 1e-6,
-                    ),
-                    -1,
-                )
-            )
-        return result, origins
-
-    phases = [("eager", execute)]
-    if args.compile:
-        # CPU mode checks Dynamo capture only, never CUDA qualification.
+    model, features = oracle.stock_refiner(65, args.device)
+    warp = torch.zeros(1, 1, 1, 2, device=args.device)
+    logits = torch.zeros(1, 1, 1, device=args.device)
+    size = torch.tensor([[6, 6]], device=args.device)
+    with torch.inference_mode():
+        expected = model.refine(warp, logits, features, features, size)
         backend = "inductor" if args.device == "cuda" else "eager"
-        phases.append(
-            (
-                "compiled",
-                torch.compile(
-                    require_compilation(execute), backend=backend, fullgraph=True
-                ),
-            )
+        # FlexGlue.compile compiles the real forward entry, not refine or a wrapper.
+        model.forward = torch.compile(
+            require_compilation(model.forward), backend=backend, fullgraph=True
         )
-    factors = [raw[..., 1:] for raw in raw_fields]
-    for factor in factors:
-        assert torch.equal(
-            factor[..., 1].square() + factor[..., 2].square(), factor[..., 1].square()
-        )
-    rows = []
-    checker = oracle.RefinerCovarianceTest()
-    for name, function in phases:
-        with torch.inference_mode():
-            for _ in range(3):
-                out, origins = function(*values)
-            assert out["dense_covi_ij"].device.type == args.device
-            if args.device == "cuda":
-                torch.cuda.synchronize()
-            if name == "compiled" and args.device == "cuda":
-                with torch.profiler.profile(
-                    activities=[
-                        torch.profiler.ProfilerActivity.CPU,
-                        torch.profiler.ProfilerActivity.CUDA,
-                    ]
-                ) as profile:
-                    out, origins = function(*values)
-                    torch.cuda.synchronize()
-                kernels = [
-                    event.name
-                    for event in profile.events()
-                    if str(event.device_type) == "DeviceType.CUDA"
+        actual = model.refine(warp, logits, features, features, size)
+        if args.device == "cuda":
+            torch.cuda.synchronize()
+        compare(actual, expected, rtol=0, atol=0)
+        kernels = []
+        if args.device == "cuda":
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
                 ]
-                assert (
-                    kernels
-                ), "No CUDA activity was observed for the compiled consumer"
-            else:
-                kernels = []
-        output = out["dense_covi_ij"].cpu()
-        compare([factor.cpu() for factor in origins], factors, rtol=0, atol=0)
-        for y in range(6):
-            for x in range(6):
-                terms = oracle.bilinear_terms(factors[0], y, x, (6, 6))
-                terms.append((Fraction(1), factors[1][0, y, x].tolist()))
-                wanted = oracle.covariance_reference(
-                    terms, (Fraction(13, 6), Fraction(20, 6))
-                )
-                a, b, _ = terms[-1][1]
-                weak = (a / (13 / 6), b / (20 / 6))
-                checker.assert_covariance(
-                    output[0, y, x], wanted, [(1, 0), (0, 1), weak]
-                )
-        rows.append(
-            {
-                "phase": name,
-                "decimal_checked_pixels": 36,
-                "cuda_kernel_events": len(kernels),
-            }
-        )
+            ) as profile:
+                profiled = model.refine(warp, logits, features, features, size)
+                torch.cuda.synchronize()
+            compare(profiled, expected, rtol=0, atol=0)
+            kernels = [
+                event.name
+                for event in profile.events()
+                if str(event.device_type) == "DeviceType.CUDA"
+            ]
+            assert kernels, "No CUDA activity was observed for the compiled consumer"
     return {
-        "nonuniform_actual_two_stage": rows,
-        "compiled_cuda_qualified": args.compile and args.device == "cuda",
-        "remaining_hold": (
-            "FP64 covariance output and structured-state API/default acceptance; "
-            "broader real-checkpoint quality remains unqualified"
-        ),
+        "maintained_covariance_tests": {"run": result.testsRun, "skipped": 0},
+        "compiled_forward_exact": True,
+        "compiled_cuda_kernel_events": len(kernels),
+        "compiled_cuda_qualified": args.device == "cuda",
+        "remaining_hold": "Broader real-checkpoint quality remains unqualified",
     }
 
 

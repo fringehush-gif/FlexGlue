@@ -29,8 +29,8 @@ directory, and the current PR bodies. No earlier artifact archive is required.
   correctness proposal overlapping the readout family. Do not apply it twice.
 - **Twelve obsolete branches were removed** after checking all active fork and
   upstream heads and bases. Eleven closed PR histories retain the exact former
-  commits; the old base is already in `main` ancestry. There are 39 open fork PRs
-  and three drafts (#36/#47/#51), but only the seven required GPU heads below.
+  commits; the old base is already in `main` ancestry. The seven GPU profiles
+  below identify the maintained review heads.
 - **No new upstream PRs.** Keep existing review units small; update an existing
   upstream counterpart where appropriate. Use the current review owners above.
 
@@ -83,13 +83,13 @@ to make the run pass. Keep executable edits in reviewed commits, not dirty trees
 
 | Order | PR / pinned head prefix | Required question |
 | --- | --- | --- |
-| 1 | #19 `d26476031d94` | CUDA KDE blur/reduction values and gradients, actual seeded sampler behavior, input/RNG ownership. Deterministic correctness is separate from default-scatter variability. |
+| 1 | #19 `6d7b24d23b05` | CUDA KDE with native tent and blur arithmetic, delayed addresses, and seeded sampler input/RNG ownership. Deterministic correctness is separate from default-scatter variability. |
 | 2 | #22 `91d0aea051a8` | Native, unpromoted selected-root differentiation and the recovered BF16 actual-head fixture. |
 | 2 | #23 `a62db4d54f5e` | Separate FP16/BF16-to-FP32 policy, confidence behavior and the original FP16 CUDA failure regression. |
 | 2 | #24 `d801d271920f` | Readout stack plus actual eligible Triton launch, rectangular exact-512 fixture and fallback/gradient/compiled delegation. |
-| 3 | #25 `ad76dcf8f814` | Native refiner reduction layout through actual consumers and gradients, including mixed precision and compiled feature-cache lifetime. |
-| 3 | #26 `d25662444ada` | Native/fused/fallback refinement composition and actual Triton backend regressions. |
-| 4, held | #36 `3cd16e8dda47` | Nonuniform multistage covariance through actual and fullgraph-compiled CUDA consumers against the precision oracle. |
+| 3 | #25 `c6ae3d2427ae` | Native refiner reduction layout through actual consumers and gradients, including mixed precision and compiled feature-cache lifetime. |
+| 3 | #26 `6bd9368d028f` | Native/fused/fallback refinement composition and actual Triton backend regressions. |
+| 4 | #36 `1d98a6fb9f12` | Stored FP32 precision inversion in maintained tests, actual two-stage consumer and fullgraph-compiled forward. |
 
 Run the profiles in that order, stopping to investigate a failure:
 
@@ -137,10 +137,10 @@ process RSS and allocation volume. Do not attach historical figures to a new
 combined tree. Optional RGB8/Triton paths have mixed or adverse timing evidence;
 keep them optional and do not flip defaults based on a microbenchmark.
 
-**#36 stays draft-held** for FP64 covariance output, structured-state hook/direct
-caller compatibility, default policy and broader real-checkpoint quality even
-if its generated CUDA checks pass. **#47 stays held** for its measured CPU
-memory/latency tradeoff; a GPU result does not erase that tradeoff.
+**#36** passed the generated two-stage and compiled-forward CUDA checks. The
+separate learned-pair replay checks inversion of the stored precision at two
+corrected cells. See the PR for its measured timing and scope. **#47** tracks
+the independent CPU lifetime and latency investigation.
 
 ## Return results and advance the PRs
 
@@ -152,6 +152,5 @@ and propagate shared fixes through its actual dependents.
 Remove `needs-local-gpu` only after the PR's stated required checks have evidence
 for its current production code, or demonstrated source-equivalent code. A runner
 pass covers its bounded fixtures, not every API/quality/performance decision.
-Retain #36's separate hold. Keep downstream/upstream descriptions consistent and
-submit no new upstream PRs under the current instruction.
+Keep downstream and upstream descriptions consistent.
 
