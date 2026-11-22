@@ -74,6 +74,7 @@ import shutil
 import sys
 import tempfile
 import time
+from numbers import Integral
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -637,6 +638,8 @@ def _reject_compiled(callable_, description):
 
 def export_descriptor(descriptor, path: Path, size, opset: int):
     _reject_compiled(descriptor.encode, "descriptor encode method")
+    # encode() accepts stride-aligned sizes beyond the preprocessing policy.
+    size = _export_size(size, FlexGlue.stride)
     model = DescriptorONNX(descriptor).eval()
     image = torch.rand(1, 3, *size)
     torch.onnx.export(
@@ -652,8 +655,29 @@ def export_descriptor(descriptor, path: Path, size, opset: int):
     )
 
 
+def _export_size(size, divisor):
+    message = (
+        "Export size must contain two positive integer dimensions "
+        f"divisible by {divisor}."
+    )
+    try:
+        sides = tuple(size)
+    except TypeError as error:
+        raise ValueError(message) from error
+    if len(sides) != 2 or any(
+        isinstance(side, bool)
+        or not isinstance(side, Integral)
+        or side <= 0
+        or side % divisor
+        for side in sides
+    ):
+        raise ValueError(message)
+    return tuple(int(side) for side in sides)
+
+
 def dummy_matcher_inputs(size, n0=1000, n1=1200, device="cpu"):
-    h, w = size[0] // 8, size[1] // 8
+    size = _export_size(size, FlexGlue.stride)
+    h, w = (side // FlexGlue.stride for side in size)
     image_size0 = torch.tensor([[1024.0, 768.0]], device=device)
     image_size1 = torch.tensor([[800.0, 1000.0]], device=device)
     return (
@@ -749,6 +773,9 @@ def export_matcher(
     symlinks and retaining existing permission bits. Other file metadata and ACLs
     follow the new file and its directory; concurrent writers are unsupported.
     """
+    if not isinstance(matcher.stride, Integral) or matcher.stride != FlexGlue.stride:
+        raise ValueError(f"ONNX export requires descriptor stride {FlexGlue.stride}.")
+    size = _export_size(size, matcher.stride)
     check_layers = (
         ()
         if early_stop_layers is None
@@ -842,6 +869,13 @@ def parse_args():
         help="Only export the matcher.",
     )
     args = parser.parse_args()
+    divisor = (
+        FlexGlue.stride if args.matcher_only else DINOv3Descriptor.edge_divisible_by
+    )
+    try:
+        args.size = _export_size(args.size, divisor)
+    except ValueError as error:
+        parser.error(str(error))
     args.early_stop_layers = [int(k) for k in args.early_stop_layers.split(",") if k]
     args.matcher_name = (
         "flexglue_matcher"
