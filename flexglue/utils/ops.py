@@ -222,8 +222,8 @@ def kde_weights(
 def identity_matches(
     kpts0: torch.Tensor, kpts1: torch.Tensor, scores: torch.Tensor, threshold: float
 ) -> dict:
-    """Match row k to row k for positive scores above threshold; zero is invalid."""
-    valid = (scores > 0) & (scores > threshold)
+    """Match row k to row k above threshold, excluding the zero sentinel."""
+    valid = (scores != 0) & (scores > threshold)
     matches = torch.where(valid, torch.arange(valid.shape[1], device=valid.device), -1)
     scores = torch.where(valid, scores, 0)
     return {

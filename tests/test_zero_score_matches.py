@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from flexglue import FlexGlue
+from flexglue.utils.ops import identity_matches
 
 
 class MatchingValidityTest(unittest.TestCase):
@@ -26,6 +27,17 @@ class MatchingValidityTest(unittest.TestCase):
             "features": torch.zeros(1, 4, 2, 2),
             "image_size": torch.tensor([[16.0, 16.0]]),
         }
+
+    def test_nonzero_scores_still_follow_the_threshold(self):
+        scores = torch.tensor([[-0.2, -0.05, -0.0, 0.0, 0.1]])
+        kpts = torch.zeros(1, 5, 2)
+        result = identity_matches(kpts, kpts, scores, -0.1)
+        expected_scores = torch.tensor([[0.0, -0.05, 0.0, 0.0, 0.1]])
+        for i in (0, 1):
+            torch.testing.assert_close(
+                result[f"matches{i}"], torch.tensor([[-1, 1, -1, -1, 4]])
+            )
+            torch.testing.assert_close(result[f"matching_scores{i}"], expected_scores)
 
     @torch.inference_mode()
     def test_rejected_sampled_pairs_stay_unmatched(self):
