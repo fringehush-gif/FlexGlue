@@ -110,6 +110,7 @@ def entmax15_window_readout(
         values = logits.float() if low_precision else logits
         max_value = vmax.float() if low_precision else vmax
         tau = entmax15_threshold((values - max_value) / 2, k)
+    del values
     h, w = hw
     r = torch.arange(-radius, radius + 1, device=logits.device)
     ny = (idx // w)[..., None] + r[:, None]
