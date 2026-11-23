@@ -14,6 +14,45 @@ from flexglue.utils.preprocess import numpy_image_to_torch
 
 
 class HostSamplingPortableTest(PacketAssertions, unittest.TestCase):
+    def test_host_sampling_does_not_retain_full_broadcast_copy(self):
+        image = np.broadcast_to(np.arange(3, dtype=np.uint8), (65535, 1, 3))
+        captured = []
+
+        class UploadBoundary(Exception):
+            pass
+
+        def capture(array):
+            captured.append(array)
+            raise UploadBoundary
+
+        # Exercise the real host prefix, stopping before any CUDA upload.
+        with patch("torch.cuda.current_device", return_value=0), patch(
+            "torch.cuda.current_stream", return_value=object()
+        ), patch("torch.from_numpy", side_effect=capture):
+            with self.assertRaises(UploadBoundary):
+                rgb8_torch.prepare_rgb8(image, target_hw=(1, 1), host_sampling=True)
+            self.assertEqual(len(captured), 1)
+            sampled = captured[0]
+            self.assertTrue(sampled.flags.c_contiguous)
+            np.testing.assert_array_equal(sampled, image[:3])
+            backing = sampled
+            while isinstance(backing.base, np.ndarray):
+                backing = backing.base
+            self.assertEqual(backing.nbytes, sampled.nbytes)
+
+            bgr = np.broadcast_to(np.arange(3, dtype=np.uint8), (64, 96, 3)).copy()
+            image = bgr[:, :, ::-1]
+            for target in ((8, 12), (64, 96)):
+                captured.clear()
+                with self.subTest(target=target), self.assertRaises(UploadBoundary):
+                    rgb8_torch.prepare_rgb8(image, target_hw=target, host_sampling=True)
+                sampled = captured[0]
+                # Preserve BGR packing and defer channel reversal to the backend.
+                np.testing.assert_array_equal(
+                    sampled, np.broadcast_to(bgr[0, 0], sampled.shape)
+                )
+                self.assertEqual(np.shares_memory(sampled, image), target == (64, 96))
+
     def test_descriptor_forward_routes_default_and_explicit_flag(self):
         descriptor = tiny_descriptor()
         image = np.zeros((32, 32, 3), dtype=np.uint8)
