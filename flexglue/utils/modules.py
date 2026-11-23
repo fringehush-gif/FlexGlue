@@ -221,7 +221,7 @@ class MatchHead(nn.Module):
         hw = cf_j.shape[-2:]
         f_query = ops.sample_features(cf_i, points_ni)
         query = F.normalize(self.to_search(f_query), dim=-1)
-        logits = (query @ search.mT).mul_(self.temperature)
+        logits = query @ search.mT * self.temperature
         grid = ops.cell_centers(*hw, scale=(hw[1], hw[0]), device=logits.device)
         p2di_nj, window_mass = ops.entmax15_window_readout(
             logits, grid, hw, threshold=self.threshold
