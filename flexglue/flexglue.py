@@ -331,6 +331,7 @@ class FlexGlue(nn.Module):
                         device=device, dtype=dtype
                     )
                 feats = [detector.extract(im) for im in images]
+                del images
                 if len({f["keypoints"].shape[1] for f in feats}) > 1:
                     raise ValueError(
                         "Batching needs the same number of keypoints in each image."
