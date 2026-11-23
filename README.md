@@ -277,7 +277,7 @@ Batching has a few requirements:
 - ```early_stop_decay```: Stop after layer ```k``` if ```covisibility_score < min_covisibility * (1 - early_stop_decay) ** (9 - k)```, lower stops earlier. Default: None (off). Never stop after first layer.
 - ```remove_border_px```: Drop matches this close to the border, in pixels of the resized image (as ```max_distance_px```). Default: 0.0.
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
-- ```rgb8_backend```: RGB8 preparation backend: `"torch"` (eager, default), or `"torch-compile"`. `None` retains the original Tensor preprocessing.
+- ```rgb8_backend```: RGB8 preparation backend: `"torch"` (eager, default), `"torch-compile"`, or `"triton"`. `None` retains the original Tensor preprocessing.
 - ```rgb8_host_sampling```: Select resize samples on the host before upload with an RGB8 backend. Default: False.
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
 - ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True.
@@ -316,7 +316,19 @@ matcher = FlexGlue().eval().cuda().compile(mode="reduce-overhead")
 ```
 The transformer layers and the correspondence heads are compiled into CUDA graphs. Keypoints are padded to the next of `static_lengths` (512, 1024, 2048, 4096 by default), larger inputs fall back to eager mode. The first calls of each new input size are slow while compiling.
 
-For HWC RGB8 NumPy inputs, eager Torch preparation is the default. The `"torch-compile"` option compiles conversion. Set `rgb8_backend=None` to retain the original Tensor preprocessing. Unsupported settings, training, gradients, non-CUDA devices and custom preprocessing use the regular path. The caller must not mutate input bytes during the blocking upload. Byte input uses the normalization buffers' dtype before resizing. Tensor and RGB8 inputs share encoder compilation.
+For HWC RGB8 NumPy inputs, eager Torch preparation is the default.
+Set `rgb8_backend="torch-compile"` to compile conversion/layout, or
+`rgb8_backend="triton"` for the optional custom fused preparation kernel.
+Eager Torch needs no extra Triton dependency; compiled Torch uses its normal
+compiler dependencies. Triton can reduce preparation intermediates, while
+measured descriptor/matcher pipeline times are broadly tied. Set
+`rgb8_backend=None` to retain the original Tensor preprocessing.
+The regular Torch path is used for unsupported settings, training, gradients,
+non-CUDA devices, unavailable Triton, or custom preprocessing. Direct `DINOv3Descriptor.describe_rgb8`
+also accepts a backend selection. The caller must not mutate input bytes during
+the blocking upload. Byte input uses the normalization buffers' dtype before
+resizing. Tensor and RGB8 inputs share encoder compilation; custom preprocessing
+receives the original-resolution tensor through the regular path. Triton is optional for the Triton preparation backend.
 
 `rgb8_host_sampling=True` is an optional choice alongside `rgb8_backend`. It
 packs the exact samples needed for eligible integer downscales before uploading;
@@ -393,3 +405,9 @@ If you use any ideas from the paper or code from this repo, please consider citi
   year      = {2026}
 }
 ```
+
+### RGB8 preparation benchmark
+
+Run `python benchmarks/benchmark_rgb8.py --help` for selectable Torch and optional
+Triton preparation measurements. The adjacent JSON records retain the source,
+environment and scope of earlier preparation and matching-pipeline measurements.
