@@ -293,9 +293,9 @@ Batching has a few requirements:
 </details>
 
 Selected extraction can skip hooks on unused later layers. Custom `extract`
-overrides still run in full and are filtered to the required strides. Custom
-feature modules must accept `scales`, or their refiner must implement
-`extract_selected`; replacement refiners need that method to use the option.
+overrides and feature forwards still run in full, then their outputs are filtered
+to the required strides. Replacement refiners need an `extract_selected` method
+to use the option.
 Supplied `fine_features` bypass extraction and need stride 1 plus every
 configured stride. A selected cache may lack levels required by another refiner.
 Both sides must have matching spatial feature grids at each refinement stride,
