@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from flexglue.utils import ops
+from flexglue.utils.modules import MatchHead
 
 
 def legacy_readout(logits, grid, hw, radius=1, k=512):
@@ -30,6 +31,42 @@ def legacy_readout(logits, grid, hw, radius=1, k=512):
 
 
 class EntmaxReadoutTest(unittest.TestCase):
+    def test_head_temperature_sweep_matches_sequential_outputs_and_gradients(self):
+        torch.manual_seed(421)
+        points = torch.rand(1, 3, 2, dtype=torch.float64) * 2 - 1
+        inputs = (
+            points,
+            torch.randn(1, 8, 2, 3, dtype=torch.float64),
+            torch.randn(1, 8, 3, 2, dtype=torch.float64),
+        )
+        for chunk in (None, 2):
+            with self.subTest(chunk=chunk):
+                head = MatchHead(8, 4, chunk).double().eval()
+                temperatures = torch.tensor(
+                    [0.05, 0.1, 0.2], dtype=torch.float64, requires_grad=True
+                )
+
+                def predict(temperature):
+                    return torch.func.functional_call(
+                        head, {"temperature": temperature}, inputs
+                    )
+
+                expected = tuple(
+                    torch.stack(values)
+                    for values in zip(*(predict(t) for t in temperatures))
+                )
+                actual = torch.vmap(predict)(temperatures)
+                torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-12)
+                gradients = [
+                    torch.autograd.grad(
+                        sum(value.square().sum() for value in output), temperatures
+                    )[0]
+                    for output in (actual, expected)
+                ]
+                self.assertTrue(gradients[0].isfinite().all())
+                self.assertEqual(gradients[0].count_nonzero(), temperatures.numel())
+                torch.testing.assert_close(*gradients, rtol=1e-10, atol=1e-12)
+
     def test_forward_matches_full_volume_reference(self):
         for dtype in (torch.float32, torch.float64):
             for batch, queries, h, w, radius, k in (
