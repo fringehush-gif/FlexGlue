@@ -95,6 +95,8 @@ def entmax15_window_readout(
     hw,
     radius: int = 1,
     k: int = 512,
+    *,
+    threshold=sorted_entmax15_threshold,
 ) -> tuple:
     """1.5-entmax expected position (B, N, 2) and mass (B, N) around the argmax."""
     low_precision = logits.dtype in (torch.float16, torch.bfloat16)
@@ -104,12 +106,14 @@ def entmax15_window_readout(
         del topi  # Keep one index per query, not the full top-k index storage.
         values = topv.float() if low_precision else topv
         max_value = vmax.float() if low_precision else vmax
-        tau = sorted_entmax15_threshold((values - max_value) / 2)
+        tau = threshold((values - max_value) / 2)
     else:
         vmax, idx = logits.max(-1, keepdim=True)
         values = logits.float() if low_precision else logits
         max_value = vmax.float() if low_precision else vmax
-        tau = entmax15_threshold((values - max_value) / 2, k)
+        sorted_values = ((values - max_value) / 2).sort(-1, descending=True).values
+        tau = threshold(sorted_values)
+        del sorted_values
     del values
     h, w = hw
     r = torch.arange(-radius, radius + 1, device=logits.device)
