@@ -222,6 +222,7 @@ class MatchHead(nn.Module):
         logits = query @ search.mT * self.temperature
         grid = ops.cell_centers(*hw, scale=(hw[1], hw[0]), device=logits.device)
         p2di_nj, window_mass = ops.entmax15_window_readout(logits, grid, hw)
+        del logits, query, grid
         f_match = ops.sample_features(cf_j, p2di_nj)
         p2di_nj = p2di_nj + self.offset_head(f_query, f_match, hw)
         if self.matchability is None:

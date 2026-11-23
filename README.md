@@ -278,7 +278,7 @@ Batching has a few requirements:
 - ```remove_border_px```: Drop matches this close to the border, in pixels of the resized image (as ```max_distance_px```). Default: 0.0.
 - ```mp```: Transformer mixed precision: ```"float16"```, ```"bfloat16"``` or ```None``` (float32). Default: ```"float16"```.
 - ```describe_resize```: Input size of the built-in descriptor, as ```resize``` above. Default: (512, 512).
-- ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True.
+- ```gemm_nn```: Sparse mode: mutual nearest neighbors in one matrix multiplication, faster for many keypoints. Default: True. GEMM and exact paths select by summed squared endpoint errors; the fallback selects by mean endpoint distance. Both threshold the mean endpoint distance.
 - ```exact_nn```: With ```gemm_nn```, compute the squared distances from coordinate differences instead of one matrix multiplication: slower but exact, also where float32 matrix multiplications run in TF32. Default: False.
 - ```query_chunk_size```: Points per correspondence-head call, bounds memory without changing results. None processes all points at once. Default: 4096.
 - ```weights```: Path or URL of the weights. Default: the release weights.
