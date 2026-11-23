@@ -101,7 +101,15 @@ def prepare_rgb8(
         raise ValueError("RGB8 preparation requires the caller's current CUDA device")
     device = torch.device("cuda", current_index)
     stream = torch.cuda.current_stream(device)
-    host_pixels, source_is_bgr = select_upload_pixels(rgb)
+    host_pixels = rgb
+    # Keep borrowed RGB/BGR layouts; compact other views before copying them.
+    if (
+        host_sampling
+        and not rgb.flags.c_contiguous
+        and rgb.strides != (src_w * 3, 3, -1)
+    ):
+        host_pixels = select_resize_samples(rgb, target_hw)
+    host_pixels, source_is_bgr = select_upload_pixels(host_pixels)
     if host_sampling:
         host_pixels = np.ascontiguousarray(
             select_resize_samples(host_pixels, target_hw)

@@ -1,5 +1,6 @@
 """Generated detector tests for byte input precision and ownership."""
 import unittest
+import weakref
 from unittest.mock import patch
 
 import numpy as np
@@ -10,6 +11,53 @@ from torch.nn import functional as F
 
 
 class DetectorDtypeTest(unittest.TestCase):
+    def test_numpy_detector_conversion_released_before_description(self):
+        owners = []
+
+        class Detector(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv2d(3, 2, 1, bias=False)
+
+            def extract(self, image):
+                owner = image
+                while owner._base is not None:
+                    owner = owner._base
+                owners.append(weakref.ref(owner))
+                response = self.conv(image[None]).mean((-2, -1)).sigmoid()
+                size = response.new_tensor([image.shape[-1], image.shape[-2]])
+                return {"keypoints": (response * size).unsqueeze(1)}
+
+        images = [
+            np.arange(h * w * 3, dtype=np.uint8).reshape(h, w, 3)
+            for h, w in ((13, 17), (15, 19))
+        ]
+        tensors = [
+            torch.tensor(image.transpose(2, 0, 1) / 255.0, dtype=torch.float32)
+            for image in images
+        ]
+        matcher, detector = tiny_matcher(), Detector().eval()
+        conf = dict(
+            describe=True,
+            describe_resize=(32, 32),
+            sparse=True,
+            max_distance_px=None,
+        )
+        with torch.no_grad():
+            expected = matcher.match_pair(*tensors, detector=detector, **conf)
+        owners.clear()
+        seen = []
+
+        def descriptor_entry(module, inputs):
+            seen.append([owner() is not None for owner in owners])
+
+        with matcher.descriptor.register_forward_pre_hook(
+            descriptor_entry
+        ), torch.no_grad():
+            actual = matcher.match_pair(*images, detector=detector, **conf)
+        self.assertEqual(seen, [[False, False], [False, False]])
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_numpy_uses_detector_floating_state(self):
         class Detector(nn.Module):
             def __init__(self, dtype, mode):
