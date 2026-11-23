@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .descriptor import DINOv3Descriptor
-from .refiner import RoMav2Refiner
+from .refiner import VGG19BN, RoMav2Refiner
 from .utils import ops
 from .utils import preprocess as pp
 from .utils.modules import (
@@ -37,6 +37,7 @@ class FlexGlue(nn.Module):
         "describe": True,  # build a DINOv3Descriptor for inputs without features
         "describe_resize": (512, 512),  # descriptor input, as refine_resize
         "refine": False,  # refine with RoMa v2's dense refiners
+        "refine_selected_features": False,  # opt in to skipping unused eval stages
         "refine_resize": (512, 512),  # refiner input, int: long side, (h, w): squash
         "refine_scales": (2, 1),  # RoMa refiner strides, coarse to fine
         "coarse_stride": 8,  # coarse grid pitch, pixels of the resized image (8: cells)
@@ -95,9 +96,16 @@ class FlexGlue(nn.Module):
                 self.descriptor.forward, mode="default", fullgraph=True
             )
         if self.refiner is not None:
-            self.refiner.features.forward = torch.compile(
-                self.refiner.features.forward, mode=mode, fullgraph=True
+            features = self.refiner.features
+            selectable = (
+                type(features) is VGG19BN and features._has_selectable_forward()
             )
+            features.forward = torch.compile(
+                features.forward, mode=mode, fullgraph=True
+            )
+            # A later decorator may copy metadata, so remember the exact wrapper.
+            if selectable:
+                features._compiled_stock_forward = features.forward
             self.refiner.forward = torch.compile(
                 self.refiner.forward, mode=mode, fullgraph=True
             )
@@ -345,9 +353,12 @@ class FlexGlue(nn.Module):
             for data in (data0, data1):
                 features = data.get("fine_features")
                 if features is None:
-                    features = self.refiner.extract(
-                        data["image"], resize=conf.refine_resize
+                    extract = (
+                        self.refiner.extract_selected
+                        if conf.refine_selected_features
+                        else self.refiner.extract
                     )
+                    features = extract(data["image"], resize=conf.refine_resize)
                 fine.append(features)
             context = context._replace(fine=tuple(fine))
         return context
