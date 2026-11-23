@@ -307,22 +307,48 @@ class FlexGlue(nn.Module):
         if detector is not None:
             byte_inputs = any(isinstance(d["image"], np.ndarray) for d in data)
             state = None
+            floating_state = None
             if byte_inputs and isinstance(detector, nn.Module):
                 state = next(chain(detector.parameters(), detector.buffers()), None)
+                floating_state = next(
+                    (
+                        value
+                        for value in chain(detector.parameters(), detector.buffers())
+                        if value.is_floating_point()
+                    ),
+                    None,
+                )
             device = state.device if state is not None else "cpu"
+            dtype = (
+                floating_state.dtype if floating_state is not None else torch.float32
+            )
             matcher_device = next(self.parameters()).device if byte_inputs else None
             for data_i in data:
                 images = data_i["image"]
                 byte_input = isinstance(images, np.ndarray)
                 if byte_input:
-                    images = pp.numpy_image_to_torch(images)[None].to(device)
+                    images = pp.numpy_image_to_torch(images)[None].to(
+                        device=device, dtype=dtype
+                    )
                 feats = [detector.extract(im) for im in images]
+                del images
                 if len({f["keypoints"].shape[1] for f in feats}) > 1:
                     raise ValueError(
                         "Batching needs the same number of keypoints in each image."
                     )
                 detected = {k: torch.cat([f[k] for f in feats]) for k in feats[0]}
                 if byte_input:
+                    # Matcher feature sampling uses FP32 geometry.
+                    if detected["keypoints"].is_floating_point():
+                        detected["keypoints"] = detected["keypoints"].float()
+                    size = detected.get("image_size")
+                    if size is not None and size.is_floating_point():
+                        # The detector may have rounded the original size through
+                        # its input dtype before reporting it as FP32.
+                        height, width = data_i["image"].shape[:2]
+                        detected["image_size"] = torch.tensor(
+                            [[width, height]], dtype=torch.float32
+                        )
                     detected = {k: v.to(matcher_device) for k, v in detected.items()}
                 data_i.update(detected)
         return self.match(*data, sparse=sparse, **conf)
