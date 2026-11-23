@@ -164,7 +164,15 @@ class ConvRefiner(nn.Module):
         if self.radius is not None:
             x.append(local_correlation(x[0], ops.to_chw(f_j), warp, self.radius))
         del f_j
-        z = self.hidden_blocks(self.block1(torch.cat(x, 1))).float()
+        # Match the nested calls' lookup order when a hook rebinds a block.
+        hidden_blocks, block1 = self.hidden_blocks, self.block1
+        x = torch.cat(x, 1)
+        del f_i, f_ji
+        x = block1(x)
+        del block1
+        z = hidden_blocks(x)
+        del hidden_blocks, x
+        z = z.float()
         delta = ops.to_hwc(self.warp_head(z))
         d = ops.to_hwc(self.confidence_head(z))
         warp = warp + torch.stack(
